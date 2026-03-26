@@ -1,44 +1,38 @@
-import { useEffect, useMemo, useState } from "react";
+import { motion } from "motion/react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  HiOutlineChevronRight,
-  HiOutlineMapPin,
-  HiOutlineSignal,
-  HiOutlineTruck,
-} from "react-icons/hi2";
+import { HiOutlineCalendarDays, HiOutlineMapPin, HiOutlineSignal, HiOutlineTruck } from "react-icons/hi2";
 import { TransitMap } from "@/components/map/TransitMap";
-import { EmptyState, ErrorState, InlineMessage, LoadingScreen, StatusPill } from "@/components/ui/Feedback";
+import { EmptyState, ErrorState, LoadingScreen, StatusPill } from "@/components/ui/Feedback";
 import { PageIntro } from "@/components/ui/PageIntro";
-import { useLiveBusFeed, useUserLocation } from "@/hooks/useLiveTransit";
-import { formatCurrency, formatDateTime, routeName, shortLocationName, toId } from "@/lib/format";
-import { routeSupportsJourney, uniqueRouteLocations } from "@/lib/routes";
-import { getAvailableTrips, getRoutes } from "@/services/smartMoveApi";
-import type { RouteRecord, Trip } from "@/types/domain";
+import { formatCurrency, formatDateTime, routeName, toId } from "@/lib/format";
+import { getAvailableTrips, getNearestBuses, getRoutes } from "@/services/smartMoveApi";
+import type { NearbyBusResult, RouteRecord, Trip } from "@/types/domain";
 
 export const DiscoverPage = () => {
   const [routes, setRoutes] = useState<RouteRecord[]>([]);
   const [trips, setTrips] = useState<Trip[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [routeId, setRouteId] = useState("");
+  const [date, setDate] = useState("");
+  const [selectedTripId, setSelectedTripId] = useState("");
+  const [nearby, setNearby] = useState<NearbyBusResult | null>(null);
+  const [routeLoading, setRouteLoading] = useState(true);
   const [tripLoading, setTripLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [date, setDate] = useState("");
-  const [pickupStopName, setPickupStopName] = useState("");
-  const [dropoffStopName, setDropoffStopName] = useState("");
-  const [selectedTripId, setSelectedTripId] = useState("");
-  const { buses } = useLiveBusFeed();
-  const { location, status: locationStatus, error: locationError, requestLocation } = useUserLocation();
 
   useEffect(() => {
     const loadRoutes = async () => {
       try {
-        setLoading(true);
-        setError(null);
+        setRouteLoading(true);
         const response = await getRoutes();
         setRoutes(response.data);
+        if (response.data[0]) {
+          setRouteId(response.data[0]._id);
+        }
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Unable to load routes.");
       } finally {
-        setLoading(false);
+        setRouteLoading(false);
       }
     };
 
@@ -50,8 +44,9 @@ export const DiscoverPage = () => {
       try {
         setTripLoading(true);
         setError(null);
-        const response = await getAvailableTrips({ date: date || undefined });
+        const response = await getAvailableTrips({ routeId: routeId || undefined, date: date || undefined });
         setTrips(response);
+        setSelectedTripId((currentValue) => currentValue || response[0]?._id || "");
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Unable to load available trips.");
       } finally {
@@ -60,235 +55,179 @@ export const DiscoverPage = () => {
     };
 
     void loadTrips();
-  }, [date]);
-
-  const locationOptions = useMemo(() => uniqueRouteLocations(routes), [routes]);
-
-  const matchingRoutes = useMemo(() => {
-    if (!pickupStopName && !dropoffStopName) {
-      return routes;
-    }
-
-    return routes.filter((route) => routeSupportsJourney(route, pickupStopName, dropoffStopName));
-  }, [dropoffStopName, pickupStopName, routes]);
-
-  const matchingTrips = useMemo(() => {
-    if (!pickupStopName && !dropoffStopName) {
-      return trips;
-    }
-
-    return trips.filter((trip) => {
-      if (!trip.route || typeof trip.route === "string") {
-        return false;
-      }
-
-      return routeSupportsJourney(trip.route, pickupStopName, dropoffStopName);
-    });
-  }, [dropoffStopName, pickupStopName, trips]);
+  }, [routeId, date]);
 
   useEffect(() => {
-    setSelectedTripId(matchingTrips[0]?._id || "");
-  }, [matchingTrips]);
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      return;
+    }
 
-  const selectedTrip = matchingTrips.find((trip) => trip._id === selectedTripId) || matchingTrips[0] || null;
-  const selectedRoute =
-    selectedTrip?.route && typeof selectedTrip.route !== "string"
-      ? (selectedTrip.route as RouteRecord)
-      : matchingRoutes[0] || null;
-  const filteredLiveBuses = selectedRoute
-    ? buses.filter((bus) => toId(bus.route) === selectedRoute._id)
-    : buses;
-  const routeUnavailable = Boolean((pickupStopName || dropoffStopName) && matchingTrips.length === 0);
+    navigator.geolocation.getCurrentPosition(
+      async ({ coords }) => {
+        try {
+          const response = await getNearestBuses({ lat: coords.latitude, lng: coords.longitude, radius: 15 });
+          setNearby(response);
+        } catch {
+          setNearby(null);
+        }
+      },
+      () => {
+        setNearby(null);
+      },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  }, []);
+
+  const selectedRoute = routes.find((route) => route._id === routeId) || routes[0] || null;
+  const selectedTrip = trips.find((trip) => trip._id === selectedTripId) || trips[0] || null;
 
   return (
-    <div className="max-w-[1400px] mx-auto px-4 md:px-6 grid gap-6 pt-10 pb-16 md:pt-6 md:pb-12">
+    <div className="container page-stack page-pad">
       <PageIntro
-        eyebrow="Trip search"
-        title="Find an available route fast"
-        description="Choose your start point and destination. If no active route covers that journey, SmartMove shows route not available."
+        eyebrow="Trip discovery"
+        title="Find the next available bus with route and fleet context"
+        description="Filter by route and date, compare fares and seat inventory, and use the map to understand the trip before you book."
       />
 
-      <section className="relative overflow-hidden bg-surface border border-surface-border rounded-xl shadow-soft p-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto] gap-4 items-end">
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[0.7rem] uppercase tracking-wider text-muted font-bold px-1">Pickup location</span>
-            <input
-              list="smartmove-pickup-stops"
-              className="w-full bg-white/60 border border-surface-border rounded-xl px-4 py-2.5 text-ink placeholder:text-muted/60 focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all"
-              value={pickupStopName}
-              onChange={(event) => setPickupStopName(event.target.value)}
-              placeholder="Enter your starting stop"
-            />
-          </label>
-
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[0.7rem] uppercase tracking-wider text-muted font-bold px-1">Destination</span>
-            <input
-              list="smartmove-dropoff-stops"
-              className="w-full bg-white/60 border border-surface-border rounded-xl px-4 py-2.5 text-ink placeholder:text-muted/60 focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all"
-              value={dropoffStopName}
-              onChange={(event) => setDropoffStopName(event.target.value)}
-              placeholder="Enter your destination"
-            />
-          </label>
-
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[0.7rem] uppercase tracking-wider text-muted font-bold px-1">Date</span>
-            <input type="date" className="w-full bg-white/60 border border-surface-border rounded-xl px-4 py-2.5 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all" value={date} onChange={(event) => setDate(event.target.value)} />
-          </label>
-
-          <div className="flex flex-col gap-2 min-w-[200px]">
-            <button type="button" className="inline-flex items-center justify-center gap-2 w-full px-4 py-3 rounded-xl border border-surface-border bg-white/65 text-ink font-semibold hover:translate-y-[-1px] transition-transform text-sm" onClick={requestLocation}>
-              {locationStatus === "ready" ? "Refresh my location" : "Use my location"}
-            </button>
-            <span className="text-muted text-[0.75rem] leading-none px-1 text-center">
-              {locationStatus === "ready"
-                ? "Positioning on map..."
-                : "Allow GPS access"}
-            </span>
-          </div>
-        </div>
-
-        <datalist id="smartmove-pickup-stops">
-          {locationOptions.map((stop) => (
-            <option key={`pickup-${stop.name}`} value={stop.name} />
-          ))}
-        </datalist>
-        <datalist id="smartmove-dropoff-stops">
-          {locationOptions.map((stop) => (
-            <option key={`dropoff-${stop.name}`} value={stop.name} />
-          ))}
-        </datalist>
-
-        {locationError ? <InlineMessage message={locationError} tone="info" /> : null}
-        {routeUnavailable ? (
-          <InlineMessage
-            message="Route not available for the selected pickup and destination."
-            tone="error"
-          />
-        ) : null}
-      </section>
-
-      <section className="grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-6 items-start">
-        <div className="relative overflow-hidden bg-surface border border-surface-border rounded-xl shadow-soft p-6 flex flex-col gap-4">
-          <div className="flex items-center justify-between gap-4 mb-2">
+      <section className="content-grid discover-grid">
+        <div className="panel filters-panel">
+          <div className="section-head compact-head">
             <div>
-              <span className="inline-flex items-center gap-2 text-[0.7rem] uppercase tracking-widest text-teal-deep font-bold leading-none mb-1">Live route map</span>
-              <h2 className="text-xl font-bold text-ink">{selectedRoute?.name || "Available network"}</h2>
+              <span className="eyebrow">Filters</span>
+              <h2>Refine what riders see</h2>
             </div>
-            <StatusPill
-              label={selectedRoute ? `${filteredLiveBuses.length} buses` : `${buses.length} live`}
-              tone="info"
-            />
           </div>
-          <TransitMap route={selectedRoute} buses={filteredLiveBuses} userLocation={location} />
-        </div>
 
-        <div className="flex flex-col gap-6">
-          <div className="relative overflow-hidden bg-surface border border-surface-border rounded-xl shadow-soft p-6 flex flex-col gap-4">
-            <div className="flex items-center justify-between gap-4 mb-1">
-              <div>
-                <span className="inline-flex items-center gap-2 text-[0.7rem] uppercase tracking-widest text-teal-deep font-bold leading-none mb-1">Available routes</span>
-                <h2 className="text-xl font-bold text-ink">{matchingRoutes.length} matched</h2>
+          <label className="field">
+            <span>Route</span>
+            <select value={routeId} onChange={(event) => setRouteId(event.target.value)} disabled={routeLoading}>
+              <option value="">All available routes</option>
+              {routes.map((route) => (
+                <option key={route._id} value={route._id}>
+                  {route.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field">
+            <span>Date</span>
+            <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+          </label>
+
+          <div className="route-chip-list">
+            {routes.slice(0, 6).map((route) => (
+              <button
+                key={route._id}
+                type="button"
+                className={`route-chip${route._id === routeId ? " is-selected" : ""}`}
+                onClick={() => setRouteId(route._id)}
+              >
+                {route.name}
+              </button>
+            ))}
+          </div>
+
+          {nearby ? (
+            <div className="panel inset-panel">
+              <div className="eyebrow-row">
+                <span className="eyebrow">Nearby fleet</span>
+                <StatusPill label={`${nearby.count} found`} tone="success" />
               </div>
-            </div>
-
-            {loading ? <LoadingScreen message="Loading routes" /> : null}
-            {error ? <ErrorState message={error} /> : null}
-            {!loading && !error ? (
-              <div className="grid gap-3">
-                {matchingRoutes.slice(0, 5).map((route) => (
-                  <div key={route._id} className="flex items-center justify-between gap-4 p-4 rounded-lg bg-white/60 border border-surface-border group transition-all">
-                    <div className="flex flex-col gap-1.5">
-                      <div className="flex items-center gap-2 text-[0.95rem]">
-                        <strong className="text-ink font-bold leading-none">{shortLocationName(route.startLocation.name)}</strong>
-                        <HiOutlineChevronRight size={14} className="text-teal/60 transition-transform group-hover:translate-x-0.5" />
-                        <strong className="text-ink font-bold leading-none">{shortLocationName(route.endLocation.name)}</strong>
-                      </div>
-                      <div className="flex items-center gap-3 text-[0.75rem] text-muted">
-                        <span className="flex items-center gap-1">
-                          <HiOutlineMapPin size={12} /> {route.distanceKm} km
-                        </span>
-                        <span className="opacity-40">•</span>
-                        <span className="flex items-center gap-1">
-                          <HiOutlineSignal size={12} /> {route.stops.length} stops
-                        </span>
-                      </div>
+              <p className="muted-copy">
+                Using your current location, SmartMove found active buses within {nearby.radiusKm} km.
+              </p>
+              <div className="mini-list">
+                {nearby.buses.slice(0, 3).map((bus) => (
+                  <div key={bus._id} className="mini-card">
+                    <div>
+                      <strong>{bus.plateNumber}</strong>
+                      <span>{bus.distanceKm} km away</span>
                     </div>
-                    <div className="text-right flex flex-col items-end">
-                      <div className="bg-teal/15 text-teal-deep px-2.5 py-1 rounded-full text-[0.75rem] font-bold mb-0.5">
-                        {formatCurrency(route.basePrice)}
-                      </div>
-                      <span className="text-[0.7rem] text-muted font-medium">Base rate</span>
+                    <div className="mini-card-side">
+                      <strong>{bus.eta.minutesAway} min</strong>
+                      <span>{bus.eta.trafficCondition} traffic</span>
                     </div>
                   </div>
                 ))}
               </div>
-            ) : null}
-          </div>
-
-          <div className="relative overflow-hidden bg-surface border border-surface-border rounded-xl shadow-soft p-6 flex flex-col gap-4">
-            <div className="flex items-center justify-between gap-4 mb-1">
-              <div>
-                <span className="inline-flex items-center gap-2 text-[0.7rem] uppercase tracking-widest text-teal-deep font-bold leading-none mb-1">Trips ready to book</span>
-                <h2 className="text-xl font-bold text-ink">{matchingTrips.length} departures</h2>
-              </div>
             </div>
-
-            {tripLoading ? <LoadingScreen message="Loading trips" /> : null}
-            {!tripLoading && !error && matchingTrips.length === 0 ? (
-              <EmptyState
-                title="No matching trips"
-                description="Try a different date or choose locations that exist on the same route."
-              />
-            ) : null}
-
-            {!tripLoading && !error && matchingTrips.length > 0 ? (
-              <div className="grid gap-4">
-                {matchingTrips.map((trip) => (
-                  <article
-                    key={trip._id}
-                    className={`p-5 rounded-lg border transition-all duration-300 ${
-                      trip._id === selectedTrip?._id 
-                        ? "bg-white/80 border-teal shadow-md ring-1 ring-teal/20" 
-                        : "bg-white/50 border-surface-border hover:bg-white/70 hover:translate-y-[-2px]"
-                    }`}
-                    onMouseEnter={() => setSelectedTripId(trip._id)}
-                  >
-                    <div className="flex items-center justify-between gap-4 mb-4">
-                      <div className="flex flex-col">
-                        <strong className="text-ink font-bold text-[1.05rem] leading-tight">{routeName(trip.route)}</strong>
-                        <p className="text-muted text-[0.85rem] mt-0.5">{formatDateTime(trip.departureTime)}</p>
-                      </div>
-                      <StatusPill label={trip.status} tone="info" />
-                    </div>
-                    <div className="grid grid-cols-2 gap-y-3 gap-x-4 pb-5 mb-5 border-b border-surface-border/60">
-                      <div className="flex items-center gap-2.5 text-ink/80 text-[0.8rem]">
-                        <HiOutlineMapPin size={16} className="text-teal/70" /> 
-                        <span className="truncate">{pickupStopName || "Starting point"}</span>
-                      </div>
-                      <div className="flex items-center gap-2.5 text-ink/80 text-[0.8rem] justify-end text-right">
-                        <span className="truncate">{trip.availableSeats} seats left</span>
-                        <HiOutlineSignal size={16} className="text-teal/70" />
-                      </div>
-                      <div className="flex items-center gap-2.5 text-ink/80 text-[0.8rem]">
-                        <HiOutlineTruck size={16} className="text-teal/70" /> 
-                        <span className="truncate">{dropoffStopName || "Destination"}</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between gap-4">
-                      <strong className="text-ink font-extrabold text-lg leading-none">{formatCurrency(trip.price)}</strong>
-                      <Link to={`/trips/${trip._id}`} className="inline-flex items-center justify-center gap-2 px-6 py-2 rounded-xl bg-gradient-to-br from-teal to-teal-deep text-white font-bold shadow-soft active:scale-95 transition-all text-sm">
-                        Review trip
-                      </Link>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            ) : null}
+          ) : (
+            <p className="muted-copy">Allow location access in the browser to surface nearby buses with ETA estimates.</p>
+          )}
         </div>
-      </div>
-    </section>
-  </div>
-);
+
+        <div className="panel map-panel">
+          <div className="section-head compact-head">
+            <div>
+              <span className="eyebrow">Route map</span>
+              <h2>{selectedRoute?.name || "City network preview"}</h2>
+            </div>
+          </div>
+          <TransitMap route={selectedRoute} buses={nearby?.buses || []} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="section-head">
+          <div>
+            <span className="eyebrow">Available departures</span>
+            <h2>Upcoming trips matched to your filters</h2>
+          </div>
+          <div className="summary-row">
+            <span>
+              <HiOutlineCalendarDays size={16} /> {trips.length} results
+            </span>
+            <span>
+              <HiOutlineTruck size={16} /> {nearby?.count || 0} nearby buses
+            </span>
+          </div>
+        </div>
+
+        {tripLoading ? <LoadingScreen message="Loading available trips" /> : null}
+        {error ? <ErrorState message={error} /> : null}
+        {!tripLoading && !error && trips.length === 0 ? (
+          <EmptyState
+            title="No trips match those filters"
+            description="Try a different route or date. The page is wired to `/trips/available`, so it will reflect whatever the backend currently publishes."
+          />
+        ) : null}
+
+        {!tripLoading && !error && trips.length > 0 ? (
+          <div className="cards-grid trip-grid">
+            {trips.map((trip) => (
+              <motion.article
+                key={trip._id}
+                className={`trip-card${trip._id === toId(selectedTrip) ? " is-selected" : ""}`}
+                whileHover={{ y: -4 }}
+                onMouseEnter={() => setSelectedTripId(trip._id)}
+              >
+                <div className="trip-card-head">
+                  <div>
+                    <strong>{routeName(trip.route)}</strong>
+                    <p>{formatDateTime(trip.departureTime)}</p>
+                  </div>
+                  <StatusPill label={trip.status} tone="info" />
+                </div>
+                <div className="trip-meta-grid">
+                  <span>
+                    <HiOutlineMapPin size={16} /> {typeof trip.route === "string" ? "Assigned route" : trip.route?.startLocation.name || "Route start"}
+                  </span>
+                  <span>
+                    <HiOutlineSignal size={16} /> {trip.availableSeats} seats left
+                  </span>
+                </div>
+                <div className="trip-card-foot">
+                  <strong>{formatCurrency(trip.price)}</strong>
+                  <Link to={`/trips/${trip._id}`} className="solid-button compact-button">
+                    Review trip
+                  </Link>
+                </div>
+              </motion.article>
+            ))}
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
 };

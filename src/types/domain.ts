@@ -89,7 +89,6 @@ export interface Booking {
   seatNumber?: number;
   pickupStop?: BookingStop;
   dropoffStop?: BookingStop;
-  travelEstimate?: TravelEstimate;
   price?: number;
   paymentStatus: "pending" | "paid" | "failed";
   bookingStatus: "confirmed" | "cancelled" | "completed";
@@ -101,24 +100,10 @@ export interface TripEta {
   tripId: string;
   departureTime: string;
   estimatedArrival: string;
-  predictedDurationMinutes: number;
   delayMinutes: number;
   trafficCondition: "light" | "moderate" | "heavy";
   confidence: number;
   status: Trip["status"];
-}
-
-export interface TravelEstimate {
-  pickupStopName: string;
-  dropoffStopName: string;
-  estimatedArrival: string;
-  predictedDurationMinutes: number;
-  delayMinutes: number;
-  trafficCondition: "light" | "moderate" | "heavy";
-  confidence: number;
-  historicalSamples: number;
-  historicalWindowDays: number;
-  model: string;
 }
 
 export interface PaymentPayload {
@@ -130,7 +115,6 @@ export interface PaymentPayload {
 export interface BookingResult {
   booking: Booking;
   payment: PaymentPayload | null;
-  travelEstimate?: TravelEstimate;
 }
 
 export interface NearbyBus extends Bus {

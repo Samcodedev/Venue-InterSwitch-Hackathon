@@ -13,7 +13,6 @@ import type {
   RouteRecord,
   Trip,
   TripEta,
-  TravelEstimate,
   User,
 } from "@/types/domain";
 
@@ -95,7 +94,6 @@ export const updateRouteRequest = async (
   routeId: string,
   payload: Partial<{
     name: string;
-    state: string;
     startLocation: { name: string; coordinates: Coordinates };
     endLocation: { name: string; coordinates: Coordinates };
     stops: Array<{ name: string; coordinates: Coordinates; order: number }>;
@@ -244,23 +242,6 @@ export const updateTripStatusRequest = async (
 
 export const getTripEta = async (tripId: string): Promise<TripEta> => {
   const response = await api.get<ApiEnvelope<TripEta>>(`/trips/${tripId}/eta`);
-  return unwrap(response.data);
-};
-
-export const getTripBookingEstimate = async (params: {
-  tripId: string;
-  pickupStopName?: string;
-  dropoffStopName?: string;
-}): Promise<TravelEstimate & { tripId: string; departureTime: string; status: Trip["status"] }> => {
-  const response = await api.get<
-    ApiEnvelope<TravelEstimate & { tripId: string; departureTime: string; status: Trip["status"] }>
-  >(`/trips/${params.tripId}/booking-estimate`, {
-    params: {
-      pickupStopName: params.pickupStopName,
-      dropoffStopName: params.dropoffStopName,
-    },
-  });
-
   return unwrap(response.data);
 };
 

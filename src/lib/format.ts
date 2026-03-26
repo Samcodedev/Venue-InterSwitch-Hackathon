@@ -7,7 +7,7 @@ export const formatCurrency = (amount?: number): string =>
     maximumFractionDigits: 0,
   }).format(amount ?? 0);
 
-export const formatDateTime = (value?: string | number | Date): string => {
+export const formatDateTime = (value?: string): string => {
   if (!value) {
     return "TBD";
   }
@@ -18,17 +18,7 @@ export const formatDateTime = (value?: string | number | Date): string => {
   }).format(new Date(value));
 };
 
-export const formatDate = (value?: string | number | Date): string => {
-  if (!value) {
-    return "TBD";
-  }
-
-  return new Intl.DateTimeFormat("en-NG", {
-    dateStyle: "medium",
-  }).format(new Date(value));
-};
-
-export const formatTimeOnly = (value?: string | number | Date): string => {
+export const formatTimeOnly = (value?: string): string => {
   if (!value) {
     return "--:--";
   }
@@ -73,7 +63,7 @@ export const busLabel = (bus?: Bus | string | null): string => {
     return "Bus assigned";
   }
 
-  return `${bus.plateNumber}${bus.busModel ? ` â€¢ ${bus.busModel}` : ""}`;
+  return `${bus.plateNumber}${bus.busModel ? ` • ${bus.busModel}` : ""}`;
 };
 
 export const getUserId = (user?: User | string | null): string => {
@@ -89,11 +79,3 @@ export const getTrip = (booking: Booking): Trip | null =>
 
 export const capitalize = (value: string): string =>
   value.charAt(0).toUpperCase() + value.slice(1);
-
-
-export const shortLocationName = (name?: string | null): string => {
-  if (!name) return ''
-  const parts = name.split(',')
-  return parts.slice(0, 2).join(',').trim()
-};
-

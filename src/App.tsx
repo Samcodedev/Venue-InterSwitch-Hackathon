@@ -9,9 +9,6 @@ const DiscoverPage = lazy(() => import("@/pages/DiscoverPage").then((module) => 
 const FleetPage = lazy(() => import("@/pages/FleetPage").then((module) => ({ default: module.FleetPage })));
 const LoginPage = lazy(() => import("@/pages/LoginPage").then((module) => ({ default: module.LoginPage })));
 const RegisterPage = lazy(() => import("@/pages/RegisterPage").then((module) => ({ default: module.RegisterPage })));
-const ForgotPasswordPage = lazy(() =>
-  import("@/pages/ForgotPasswordPage").then((module) => ({ default: module.ForgotPasswordPage })),
-);
 const TripDetailsPage = lazy(() => import("@/pages/TripDetailsPage").then((module) => ({ default: module.TripDetailsPage })));
 const BookingsPage = lazy(() => import("@/pages/BookingsPage").then((module) => ({ default: module.BookingsPage })));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage").then((module) => ({ default: module.ProfilePage })));
@@ -25,28 +22,27 @@ const withSuspense = (node: ReactNode) => (
 export const App = () => (
   <BrowserRouter>
     <Routes>
-      <Route
-        path="login"
-        element={
-          <RedirectIfAuthenticated>
-            {withSuspense(<LoginPage />)}
-          </RedirectIfAuthenticated>
-        }
-      />
-      <Route
-        path="register"
-        element={
-          <RedirectIfAuthenticated>
-            {withSuspense(<RegisterPage />)}
-          </RedirectIfAuthenticated>
-        }
-      />
-      <Route path="forgot-password" element={withSuspense(<ForgotPasswordPage />)} />
       <Route element={<AppShell />}>
         <Route index element={withSuspense(<HomePage />)} />
         <Route path="discover" element={withSuspense(<DiscoverPage />)} />
         <Route path="fleet" element={withSuspense(<FleetPage />)} />
         <Route path="trips/:tripId" element={withSuspense(<TripDetailsPage />)} />
+        <Route
+          path="login"
+          element={
+            <RedirectIfAuthenticated>
+              {withSuspense(<LoginPage />)}
+            </RedirectIfAuthenticated>
+          }
+        />
+        <Route
+          path="register"
+          element={
+            <RedirectIfAuthenticated>
+              {withSuspense(<RegisterPage />)}
+            </RedirectIfAuthenticated>
+          }
+        />
         <Route element={<RequireAuth />}>
           <Route path="bookings" element={withSuspense(<BookingsPage />)} />
           <Route path="profile" element={withSuspense(<ProfilePage />)} />

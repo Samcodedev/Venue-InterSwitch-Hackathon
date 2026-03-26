@@ -4,11 +4,51 @@ import type { Bus, Coordinates } from "@/types/domain";
 
 type LocationStatus = "idle" | "requesting" | "ready" | "denied" | "unsupported" | "error";
 
-export const useLiveBusFeed = (refreshMs = 300000) => {
-  const [buses, setBuses] = useState<Bus[]>([]);
+const DEFAULT_LIVE_BUS_REFRESH_MS = 20 * 60 * 1000;
+const LIVE_BUS_START_HOUR = 6;
+const LIVE_BUS_END_HOUR = 23;
+const LIVE_BUS_TIMEZONE = "Africa/Lagos";
+
+const getLagosHour = (date = new Date()): number =>
+  Number(
+    new Intl.DateTimeFormat("en-GB", {
+      hour: "numeric",
+      hour12: false,
+      timeZone: LIVE_BUS_TIMEZONE,
+    }).format(date),
+  );
+
+const isLiveBusWindowOpen = (date = new Date()): boolean => {
+  const hour = getLagosHour(date);
+
+  return hour >= LIVE_BUS_START_HOUR && hour < LIVE_BUS_END_HOUR;
+};
+
+const stripBusLocations = (buses: Bus[]): Bus[] =>
+  buses.map((bus) => ({
+    ...bus,
+    currentLocation: undefined,
+  }));
+
+export const useLiveBusFeed = (refreshMs = DEFAULT_LIVE_BUS_REFRESH_MS) => {
+  const [rawBuses, setRawBuses] = useState<Bus[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [liveWindowOpen, setLiveWindowOpen] = useState(() => isLiveBusWindowOpen());
+
+  useEffect(() => {
+    const updateWindowStatus = () => {
+      setLiveWindowOpen(isLiveBusWindowOpen());
+    };
+
+    updateWindowStatus();
+    const interval = window.setInterval(updateWindowStatus, 60000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -20,7 +60,7 @@ export const useLiveBusFeed = (refreshMs = 300000) => {
           return;
         }
 
-        setBuses(response.data.filter((bus) => bus.status === "active"));
+        setRawBuses(response.data);
         setError(null);
         setLastUpdated(Date.now());
       } catch (loadError) {
@@ -36,6 +76,7 @@ export const useLiveBusFeed = (refreshMs = 300000) => {
       }
     };
 
+    setLoading(true);
     void loadBuses();
     const interval = window.setInterval(() => {
       void loadBuses();
@@ -47,11 +88,17 @@ export const useLiveBusFeed = (refreshMs = 300000) => {
     };
   }, [refreshMs]);
 
+  const buses = useMemo(
+    () => (liveWindowOpen ? rawBuses : stripBusLocations(rawBuses)),
+    [liveWindowOpen, rawBuses],
+  );
+
   return {
     buses,
     loading,
     error,
     lastUpdated,
+    isLiveWindowOpen: liveWindowOpen,
   };
 };
 
