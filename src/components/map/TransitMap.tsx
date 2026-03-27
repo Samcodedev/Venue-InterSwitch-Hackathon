@@ -30,7 +30,6 @@ const FitMap = ({ points, routeId, fitPoints }: { points: [number, number][]; ro
   const hasFitToUser = useRef(false);
 
   useEffect(() => {
-    // Priority 1: fit to user + nearest stop as soon as we have them (once only)
     if (fitPoints && fitPoints.length > 1 && !hasFitToUser.current) {
       map.fitBounds(fitPoints, { padding: [60, 60] });
       hasFitToUser.current = true;
@@ -39,7 +38,6 @@ const FitMap = ({ points, routeId, fitPoints }: { points: [number, number][]; ro
       return;
     }
 
-    // Priority 2: fit to all route/stop points on first load or route change (not when buses update)
     if (points.length === 0) return;
     if (!hasMounted.current || currentRouteId.current !== routeId) {
       map.fitBounds(points, { padding: [40, 40] });

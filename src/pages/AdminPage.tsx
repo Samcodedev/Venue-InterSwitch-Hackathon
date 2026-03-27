@@ -117,7 +117,6 @@ const emptyTripForm = {
   price: "",
 };
 
-// Fix Leaflet icon issue
 const DefaultIcon = L.icon({
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
@@ -263,7 +262,6 @@ const getBoundingBox = (lat1?: string, lng1?: string, lat2?: string, lng2?: stri
   const minLng = Math.min(...lngs);
   const maxLng = Math.max(...lngs);
 
-// Padding 0.1 degree (~11km)
   const pad = 0.1;
   return `${minLng - pad},${maxLat + pad},${maxLng + pad},${minLat - pad}`;
 };
@@ -412,7 +410,6 @@ const fetchSuggestedRouteStops = async ({
       ? distanceToPolyline({ lat, lng }, routePath)
       : distanceFromRouteLine({ lat, lng }, start, end);
 
-    // 0.008 degrees is roughly 800m threshold on actual road path
     const threshold = routePath.length > 1 ? 0.008 : 0.05;
 
     if (dist > threshold) {

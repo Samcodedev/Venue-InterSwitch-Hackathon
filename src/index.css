@@ -102,7 +102,6 @@ a {
     padding-bottom: 3rem;
   }
 }
-/* --- END OF LEGACY STYLES --- */
 
 .page-stack {
   display: grid;
@@ -115,7 +114,6 @@ a {
   flex-direction: column;
 }
 
-/* Dashboard Shell Layout */
 .dashboard-shell {
   display: flex;
   min-height: 100vh;
