@@ -13,18 +13,24 @@ export const PageIntro = ({
   actions?: ReactNode;
 }) => (
   <motion.section
-    className="page-intro"
+    className="mb-10"
     initial={{ opacity: 0, y: 12 }}
     animate={{ opacity: 1, y: 0 }}
     transition={{ duration: 0.45 }}
   >
-    <span className="eyebrow">{eyebrow}</span>
-    <div className="page-intro-row">
-      <div>
-        <h1>{title}</h1>
-        <p>{description}</p>
+    <span className="inline-flex items-center gap-2 text-[0.7rem] uppercase tracking-widest text-teal-deep font-extrabold mb-2.5">
+      {eyebrow}
+    </span>
+    <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
+      <div className="max-w-2xl">
+        <h1 className="text-3xl md:text-4xl font-extrabold text-ink tracking-tight leading-tight">
+          {title}
+        </h1>
+        <p className="text-muted text-lg mt-2.5 leading-relaxed">
+          {description}
+        </p>
       </div>
-      {actions ? <div className="page-intro-actions">{actions}</div> : null}
+      {actions ? <div className="flex items-center gap-3 flex-wrap">{actions}</div> : null}
     </div>
   </motion.section>
 );

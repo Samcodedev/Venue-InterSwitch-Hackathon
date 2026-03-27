@@ -1,36 +1,52 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { HiOutlineArrowTopRightOnSquare, HiOutlineClock, HiOutlineMapPin, HiOutlineSignal, HiOutlineTicket } from "react-icons/hi2";
+import {
+  HiOutlineArrowTopRightOnSquare,
+  HiOutlineClock,
+  HiOutlineMapPin,
+  HiOutlineSignal,
+  HiOutlineSparkles,
+  HiOutlineTicket,
+} from "react-icons/hi2";
 import { TransitMap } from "@/components/map/TransitMap";
 import { EmptyState, ErrorState, InlineMessage, LoadingScreen, StatusPill, ToastBanner } from "@/components/ui/Feedback";
 import { PageIntro } from "@/components/ui/PageIntro";
 import { useAuth } from "@/contexts/AuthContext";
-import { formatCurrency, formatDateTime, routeName, toId } from "@/lib/format";
-import { createBookingRequest, getTripById, getTripEta } from "@/services/smartMoveApi";
-import type { BookingResult, LocationPoint, RouteRecord, Trip, TripEta } from "@/types/domain";
+import { useUserLocation } from "@/hooks/useLiveTransit";
+import { formatCurrency, formatDateTime, routeName, shortLocationName, toId } from "@/lib/format";
+import { submitInterswitchPayment } from "@/lib/payment";
+import { getRouteStopOptions, routeSupportsJourney, toBookingStop } from "@/lib/routes";
+import {
+  createBookingRequest,
+  getTripBookingEstimate,
+  getTripById,
+  getTripEta,
+} from "@/services/smartMoveApi";
+import type { BookingResult, RouteRecord, Trip, TripEta, TravelEstimate } from "@/types/domain";
 
 export const TripDetailsPage = () => {
   const navigate = useNavigate();
   const { tripId = "" } = useParams();
   const { isAuthenticated } = useAuth();
+  const { location } = useUserLocation();
   const [trip, setTrip] = useState<Trip | null>(null);
   const [eta, setEta] = useState<TripEta | null>(null);
+  const [estimate, setEstimate] = useState<TravelEstimate | null>(null);
   const [loading, setLoading] = useState(true);
+  const [estimateLoading, setEstimateLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [bookingResult, setBookingResult] = useState<BookingResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [seatNumber, setSeatNumber] = useState("");
-  const [pickupStop, setPickupStop] = useState("");
-  const [dropoffStop, setDropoffStop] = useState("");
-  const [callbackUrl, setCallbackUrl] = useState(() =>
-    typeof window !== "undefined" ? `${window.location.origin}/bookings` : "",
-  );
+  const [pickupStopName, setPickupStopName] = useState("");
+  const [dropoffStopName, setDropoffStopName] = useState("");
 
   useEffect(() => {
     const loadTrip = async () => {
       try {
         setLoading(true);
+        setError(null);
         const [tripResponse, etaResponse] = await Promise.all([getTripById(tripId), getTripEta(tripId)]);
         setTrip(tripResponse);
         setEta(etaResponse);
@@ -56,11 +72,48 @@ export const TripDetailsPage = () => {
   }, [banner]);
 
   const route = trip?.route && typeof trip.route !== "string" ? (trip.route as RouteRecord) : null;
-  const stopOptions: LocationPoint[] = route
-    ? [route.startLocation, ...route.stops.map((stop) => ({ name: stop.name, coordinates: stop.coordinates })), route.endLocation]
-    : [];
+  const stopOptions = useMemo(() => getRouteStopOptions(route), [route]);
+  const routeAvailable = routeSupportsJourney(route, pickupStopName, dropoffStopName);
 
-  const parseStop = (name: string) => stopOptions.find((stop) => stop.name === name);
+  useEffect(() => {
+    if (!trip || !route || !routeAvailable) {
+      if (!routeAvailable && (pickupStopName || dropoffStopName)) {
+        setEstimate(null);
+      }
+      return;
+    }
+
+    let active = true;
+
+    const loadEstimate = async () => {
+      try {
+        setEstimateLoading(true);
+        const response = await getTripBookingEstimate({
+          tripId: trip._id,
+          pickupStopName: pickupStopName || undefined,
+          dropoffStopName: dropoffStopName || undefined,
+        });
+
+        if (active) {
+          setEstimate(response);
+        }
+      } catch {
+        if (active) {
+          setEstimate(null);
+        }
+      } finally {
+        if (active) {
+          setEstimateLoading(false);
+        }
+      }
+    };
+
+    void loadEstimate();
+
+    return () => {
+      active = false;
+    };
+  }, [dropoffStopName, pickupStopName, route, routeAvailable, trip]);
 
   const handleBooking = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -74,11 +127,8 @@ export const TripDetailsPage = () => {
       return;
     }
 
-    const pickup = parseStop(pickupStop);
-    const dropoff = parseStop(dropoffStop);
-
-    if (pickup && dropoff && pickup.name === dropoff.name) {
-      setError("Pickup and dropoff stops must be different.");
+    if (!routeAvailable) {
+      setError("Route not available for the selected pickup and destination.");
       return;
     }
 
@@ -88,12 +138,16 @@ export const TripDetailsPage = () => {
       const result = await createBookingRequest({
         tripId: trip._id,
         seatNumber: seatNumber ? Number(seatNumber) : undefined,
-        pickupStop: pickup,
-        dropoffStop: dropoff,
-        callbackUrl: callbackUrl || undefined,
+        pickupStop: pickupStopName ? toBookingStop(route, pickupStopName) : undefined,
+        dropoffStop: dropoffStopName ? toBookingStop(route, dropoffStopName) : undefined,
       });
       setBookingResult(result);
-      setBanner("Booking created successfully.");
+      setEstimate(result.travelEstimate || estimate);
+      setBanner(
+        result.payment
+          ? "Booking created. Continue to Interswitch to complete payment."
+          : "Booking created successfully.",
+      );
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Booking failed.");
     } finally {
@@ -103,7 +157,7 @@ export const TripDetailsPage = () => {
 
   if (loading) {
     return (
-      <div className="container page-pad">
+      <div className="max-w-[1400px] mx-auto px-4 md:px-6 pt-10 pb-16 md:pt-6 md:pb-12">
         <LoadingScreen message="Loading trip details" />
       </div>
     );
@@ -111,7 +165,7 @@ export const TripDetailsPage = () => {
 
   if (error && !trip) {
     return (
-      <div className="container page-pad">
+      <div className="max-w-[1400px] mx-auto px-4 md:px-6 pt-10 pb-16 md:pt-6 md:pb-12">
         <ErrorState message={error} />
       </div>
     );
@@ -119,126 +173,187 @@ export const TripDetailsPage = () => {
 
   if (!trip) {
     return (
-      <div className="container page-pad">
+      <div className="max-w-[1400px] mx-auto px-4 md:px-6 pt-10 pb-16 md:pt-6 md:pb-12">
         <EmptyState title="Trip not found" description="This trip may have been removed or the ID is invalid." />
       </div>
     );
   }
 
   return (
-    <div className="container page-stack page-pad">
+    <div className="max-w-[1400px] mx-auto px-4 md:px-6 grid gap-6 pt-10 pb-16 md:pt-6 md:pb-12">
       <ToastBanner message={banner} />
       <PageIntro
         eyebrow="Trip review"
         title={routeName(trip.route)}
-        description="Review timing, route shape, and booking inputs before sending a booking request to the backend."
+        description="Choose your stops, check the predicted duration, and complete the booking from one screen."
       />
 
-      <section className="content-grid trip-detail-grid">
-        <div className="panel map-panel">
-          <div className="section-head compact-head">
+      <section className="grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-6 items-start">
+        <div className="p-6 bg-surface border border-surface-border rounded-xl shadow-soft flex flex-col gap-4">
+          <div className="flex items-center justify-between gap-4 mb-2">
             <div>
-              <span className="eyebrow">Route context</span>
-              <h2>{route?.name || "Mapped journey"}</h2>
+              <span className="inline-flex items-center gap-2 text-[0.7rem] uppercase tracking-widest text-teal-deep font-bold leading-none mb-1">Live route</span>
+              <h2 className="text-xl font-bold text-ink">{route?.name || "Trip map"}</h2>
             </div>
             <StatusPill label={trip.status} tone="info" />
           </div>
-          <TransitMap route={route} buses={typeof trip.bus === "string" ? [] : [trip.bus]} />
-          {route ? (
-            <div className="journey-grid route-journey">
-              {[route.startLocation, ...route.stops, route.endLocation].map((stop, index) => (
-                <div key={`${stop.name}-${index}`} className="journey-step">
-                  <span>{index + 1}</span>
-                  <strong>{stop.name}</strong>
-                </div>
-              ))}
-            </div>
-          ) : null}
+          <TransitMap route={route} buses={typeof trip.bus === "string" ? [] : [trip.bus]} userLocation={location} />
+          <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-6 gap-3 mt-4">
+            {stopOptions.map((stop, index) => (
+              <div key={`${stop.name}-${index}`} className="flex items-center gap-2.5 p-3 rounded-xl bg-white/40 border border-surface-border text-[0.75rem] font-bold text-ink/70">
+                <span className="w-5 h-5 flex items-center justify-center rounded-full bg-teal/10 text-teal text-[0.6rem]">{index + 1}</span>
+                <strong className="truncate" title={stop.name}>{shortLocationName(stop.name)}</strong>
+              </div>
+            ))}
+          </div>
         </div>
 
-        <div className="panel booking-panel">
-          <div className="trip-meta-grid detail-meta-grid">
-            <span>
-              <HiOutlineClock size={16} /> {formatDateTime(trip.departureTime)}
-            </span>
-            <span>
-              <HiOutlineSignal size={16} /> {trip.availableSeats} seats left
-            </span>
-            <span>
-              <HiOutlineTicket size={16} /> {formatCurrency(trip.price)}
-            </span>
-            {eta ? (
-              <span>
-                <HiOutlineMapPin size={16} /> {eta.delayMinutes} min delay · {eta.trafficCondition}
-              </span>
-            ) : null}
+        <div className="flex flex-col gap-6">
+          <div className="relative overflow-hidden bg-surface border border-surface-border rounded-lg shadow-soft p-8 flex flex-col gap-8">
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-2 gap-4 pb-6 border-b border-surface-border/60">
+              <div className="flex flex-col gap-1">
+                <span className="flex items-center gap-2 text-[0.65rem] font-bold uppercase tracking-widest text-muted">
+                  <HiOutlineClock size={14} className="text-teal/60" /> Departure
+                </span>
+                <span className="text-sm font-bold text-ink font-mono">{formatDateTime(trip.departureTime)}</span>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="flex items-center gap-2 text-[0.65rem] font-bold uppercase tracking-widest text-muted">
+                  <HiOutlineSignal size={14} className="text-teal/60" /> Left
+                </span>
+                <span className="text-sm font-bold text-ink">{trip.availableSeats} seats</span>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="flex items-center gap-2 text-[0.65rem] font-bold uppercase tracking-widest text-muted">
+                  <HiOutlineTicket size={14} className="text-teal/60" /> Fare
+                </span>
+                <span className="text-sm font-bold text-ink">{formatCurrency(trip.price)}</span>
+              </div>
+              {eta ? (
+                <div className="flex flex-col gap-1 col-span-2">
+                  <span className="flex items-center gap-2 text-[0.65rem] font-bold uppercase tracking-widest text-muted">
+                    <HiOutlineMapPin size={14} className="text-teal/60" /> Live delay
+                  </span>
+                  <span className="text-sm font-bold text-ink">{eta.delayMinutes} min predicted delay</span>
+                </div>
+              ) : null}
+            </div>
+
+            <form className="flex flex-col gap-6" onSubmit={handleBooking}>
+              <label className="flex flex-col gap-2">
+                <span className="text-[0.7rem] font-bold uppercase tracking-wider text-muted px-1">Seat number</span>
+                <input
+                  type="number"
+                  min={1}
+                  className="w-full bg-white/60 border border-surface-border rounded-xl px-4 py-3 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-semibold"
+                  max={trip.availableSeats}
+                  value={seatNumber}
+                  onChange={(event) => setSeatNumber(event.target.value)}
+                  placeholder="Optional/Auto-assign"
+                />
+              </label>
+
+              <label className="flex flex-col gap-2">
+                <span className="text-[0.7rem] font-bold uppercase tracking-wider text-muted px-1">Pickup stop</span>
+                <select className="w-full bg-white/60 border border-surface-border rounded-xl px-4 py-3 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-semibold appearance-none cursor-pointer" value={pickupStopName} onChange={(event) => setPickupStopName(event.target.value)}>
+                  <option value="">Use route start</option>
+                  {stopOptions.slice(0, -1).map((stop) => (
+                    <option key={stop.name} value={stop.name}>
+                      {stop.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="flex flex-col gap-2">
+                <span className="text-[0.7rem] font-bold uppercase tracking-wider text-muted px-1">Destination stop</span>
+                <select className="w-full bg-white/60 border border-surface-border rounded-xl px-4 py-3 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-semibold appearance-none cursor-pointer" value={dropoffStopName} onChange={(event) => setDropoffStopName(event.target.value)}>
+                  <option value="">Use route end</option>
+                  {stopOptions.slice(1).map((stop) => (
+                    <option key={`drop-${stop.name}`} value={stop.name}>
+                      {stop.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {!routeAvailable ? (
+                <InlineMessage
+                  message="Selected journey is invalid for this route direction."
+                  tone="error"
+                />
+              ) : null}
+
+              {error ? <InlineMessage message={error} tone="error" /> : null}
+
+              <button 
+                type="submit" 
+                className="w-full py-4 rounded-xl bg-gradient-to-br from-teal to-teal-deep text-white font-black text-sm uppercase tracking-widest shadow-lg hover:shadow-teal/20 hover:scale-[1.01] transition-all disabled:opacity-50 disabled:hover:scale-100" 
+                disabled={submitting}
+              >
+                {submitting ? "Booking..." : "Book this seat"}
+              </button>
+            </form>
           </div>
 
-          <form className="form-stack" onSubmit={handleBooking}>
-            <label className="field">
-              <span>Seat number (optional)</span>
-              <input
-                type="number"
-                min={1}
-                max={trip.availableSeats}
-                value={seatNumber}
-                onChange={(event) => setSeatNumber(event.target.value)}
-              />
-            </label>
-
-            <label className="field">
-              <span>Pickup stop</span>
-              <select value={pickupStop} onChange={(event) => setPickupStop(event.target.value)}>
-                <option value="">Select pickup</option>
-                {stopOptions.map((stop) => (
-                  <option key={stop.name} value={stop.name}>
-                    {stop.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="field">
-              <span>Dropoff stop</span>
-              <select value={dropoffStop} onChange={(event) => setDropoffStop(event.target.value)}>
-                <option value="">Select dropoff</option>
-                {stopOptions.map((stop) => (
-                  <option key={`drop-${stop.name}`} value={stop.name}>
-                    {stop.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="field">
-              <span>Payment callback URL</span>
-              <input type="url" value={callbackUrl} onChange={(event) => setCallbackUrl(event.target.value)} />
-            </label>
-
-            {error ? <InlineMessage message={error} tone="error" /> : null}
-
-            <button type="submit" className="solid-button" disabled={submitting}>
-              {submitting ? "Creating booking..." : "Reserve this trip"}
-            </button>
-          </form>
-
-          {bookingResult ? (
-            <div className="panel inset-panel booking-success">
-              <strong>Booking reference: {toId(bookingResult.booking)}</strong>
-              <p>
-                Payment status is {bookingResult.booking.paymentStatus}. Continue to the payment page if the backend returned a redirect.
-              </p>
-              {bookingResult.payment?.redirectUrl ? (
-                <a href={bookingResult.payment.redirectUrl} target="_blank" rel="noreferrer" className="solid-button compact-button">
-                  <HiOutlineArrowTopRightOnSquare size={16} />
-                  <span>Open payment page</span>
-                </a>
-              ) : null}
-              <Link to="/bookings" className="text-link">
-                Go to my bookings
-              </Link>
+          <div className="relative overflow-hidden bg-surface border border-surface-border rounded-xl shadow-soft p-6 flex flex-col gap-4">
+            <div className="flex items-center justify-between gap-4 mb-1">
+              <div>
+                <span className="inline-flex items-center gap-2 text-[0.7rem] uppercase tracking-widest text-teal-deep font-bold leading-none mb-1">AI estimate</span>
+                <h2 className="text-xl font-bold text-ink">Predicted destination arrival</h2>
+              </div>
+              <HiOutlineSparkles size={22} className="text-amber-500 animate-pulse" />
             </div>
-          ) : null}
+
+            {estimateLoading ? <LoadingScreen message="Calculating metrics" /> : null}
+            {!estimateLoading && estimate ? (
+              <div className="flex flex-col gap-6">
+                <div className="p-5 rounded-lg bg-teal/5 border border-teal/10 flex items-center justify-between gap-4">
+                  <div className="flex flex-col gap-1">
+                    <strong className="text-2xl font-black text-ink font-mono">{estimate.predictedDurationMinutes} min</strong>
+                    <span className="text-[0.7rem] text-muted font-bold uppercase tracking-tight">Predicted journey time</span>
+                  </div>
+                  <div className="text-right flex flex-col gap-1">
+                    <strong className="text-xl font-bold text-teal-deep">{formatDateTime(estimate.estimatedArrival)}</strong>
+                    <span className="text-[0.7rem] text-muted font-bold uppercase tracking-wide">{estimate.trafficCondition} traffic</span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4 pb-2 text-[0.7rem] text-muted font-bold uppercase tracking-wider">
+                  <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-teal/30" /> Delay: {estimate.delayMinutes} min</span>
+                  <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-teal/30" /> Confidence: {Math.round(estimate.confidence * 100)}%</span>
+                  <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-teal/30" /> History: {estimate.historicalSamples} trips</span>
+                </div>
+              </div>
+            ) : null}
+
+            {bookingResult ? (
+              <div className="mt-4 p-6 rounded-lg bg-emerald-50 border border-emerald-100 flex flex-col gap-4 shadow-sm">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600">
+                    <HiOutlineSparkles size={18} />
+                  </div>
+                  <strong className="text-[0.95rem] text-emerald-900">Booking confirmed!</strong>
+                </div>
+                <p className="text-sm text-emerald-800 leading-relaxed font-medium">
+                  Reference: <span className="font-mono bg-white/50 px-1.5 py-0.5 rounded border border-emerald-100">{toId(bookingResult.booking)}</span>. Your seat is reserved.
+                </p>
+                {bookingResult.payment ? (
+                  <button
+                    type="button"
+                    className="w-full py-3 rounded-xl bg-emerald-500 text-white font-bold text-center shadow-md shadow-emerald-200 hover:scale-[1.02] active:scale-95 transition-all text-sm flex items-center justify-center gap-2"
+                    onClick={() => submitInterswitchPayment(bookingResult.payment!)}
+                  >
+                    <HiOutlineArrowTopRightOnSquare size={18} />
+                    <span>Continue to Interswitch</span>
+                  </button>
+                ) : (
+                  <Link to="/bookings" className="w-full py-3 rounded-xl bg-white border border-emerald-200 text-emerald-700 font-bold text-center shadow-sm text-sm">
+                    Go to my bookings
+                  </Link>
+                )}
+              </div>
+            ) : null}
+          </div>
         </div>
       </section>
     </div>
