@@ -278,7 +278,7 @@ export const DiscoverPage = () => {
                     </div>
                     <div className="flex items-center justify-between gap-4">
                       <strong className="text-ink font-extrabold text-lg leading-none">{formatCurrency(trip.price)}</strong>
-                      <Link to={`/trips/${trip._id}`} className="inline-flex items-center justify-center gap-2 px-6 py-2 rounded-xl bg-gradient-to-br from-teal to-teal-deep text-white font-bold shadow-soft active:scale-95 transition-all text-sm">
+                      <Link to={`/trips/${trip._id}?pickup=${encodeURIComponent(pickupStopName)}&dropoff=${encodeURIComponent(dropoffStopName)}`} className="inline-flex items-center justify-center gap-2 px-6 py-2 rounded-xl bg-gradient-to-br from-teal to-teal-deep text-white font-bold shadow-soft active:scale-95 transition-all text-sm">
                         Review trip
                       </Link>
                     </div>

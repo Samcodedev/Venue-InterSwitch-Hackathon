@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   HiOutlineArrowTopRightOnSquare,
   HiOutlineClock,
@@ -27,6 +27,7 @@ import type { BookingResult, RouteRecord, Trip, TripEta, TravelEstimate } from "
 export const TripDetailsPage = () => {
   const navigate = useNavigate();
   const { tripId = "" } = useParams();
+  const [searchParams] = useSearchParams();
   const { isAuthenticated } = useAuth();
   const { location } = useUserLocation();
   const [trip, setTrip] = useState<Trip | null>(null);
@@ -39,8 +40,8 @@ export const TripDetailsPage = () => {
   const [bookingResult, setBookingResult] = useState<BookingResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [seatNumber, setSeatNumber] = useState("");
-  const [pickupStopName, setPickupStopName] = useState("");
-  const [dropoffStopName, setDropoffStopName] = useState("");
+  const [pickupStopName, setPickupStopName] = useState(searchParams.get("pickup") || "");
+  const [dropoffStopName, setDropoffStopName] = useState(searchParams.get("dropoff") || "");
 
   useEffect(() => {
     const loadTrip = async () => {
