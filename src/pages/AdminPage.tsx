@@ -6,18 +6,22 @@ import {
   HiOutlineClock,
   HiOutlineMap,
   HiOutlinePlus,
+  HiOutlineMagnifyingGlass,
   HiOutlineTicket,
   HiOutlineTruck,
   HiOutlineUserCircle,
   HiOutlineUsers,
+  HiOutlineLockClosed,
+  HiOutlineCreditCard,
 } from "react-icons/hi2";
-import { MapContainer, Marker, TileLayer, useMapEvents } from "react-leaflet";
+import { TransitMap } from "@/components/map/TransitMap";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { EmptyState, InlineMessage, LoadingScreen, StatusPill, ToastBanner } from "@/components/ui/Feedback";
 import { PageIntro } from "@/components/ui/PageIntro";
 import { useAuth } from "@/contexts/AuthContext";
-import { busLabel, capitalize, formatCurrency, formatDateTime, getTrip, getUserId, routeName, toId } from "@/lib/format";
+import { capitalize, formatCurrency, formatDate, getTrip, getUserId, routeName, shortLocationName, toId } from "@/lib/format";
+import { buildDraftRoute } from "@/lib/routes";
 import {
   createBusRequest,
   createDriverRequest,
@@ -41,13 +45,14 @@ import {
 } from "@/services/smartMoveApi";
 import type { Booking, Bus, Driver, Role, RouteRecord, Trip, User } from "@/types/domain";
 
-type AdminTab = "routes" | "buses" | "drivers" | "trips" | "users" | "bookings";
+type AdminTab = "routes" | "buses" | "drivers" | "trips" | "users" | "bookings" | "settings";
 
 interface EditableStop {
   name: string;
   lat: string;
   lng: string;
   order: string;
+  enabled: boolean;
 }
 
 const tabs: Array<{ id: AdminTab; label: string }> = [
@@ -57,6 +62,7 @@ const tabs: Array<{ id: AdminTab; label: string }> = [
   { id: "trips", label: "Trips" },
   { id: "users", label: "Users" },
   { id: "bookings", label: "Bookings" },
+  { id: "settings", label: "Settings" },
 ];
 
 const NIGERIAN_STATES = [
@@ -80,7 +86,7 @@ const emptyRouteForm = {
   basePrice: "",
   distanceKm: "",
   estimatedDuration: "",
-  stops: [{ name: "", lat: "", lng: "", order: "1" }] as EditableStop[],
+  stops: [] as EditableStop[],
 };
 
 const emptyBusForm = {
@@ -197,27 +203,36 @@ const LocationAutocomplete = ({
   }, [value, viewbox, state]);
 
   return (
-    <div className="location-autocomplete">
-      <label className="field">
-        <span>{label}</span>
-        <input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onFocus={() => {
-            if (suggestions.length > 0) setShow(true);
-          }}
-          onBlur={() => setTimeout(() => setShow(false), 200)}
-          placeholder={placeholder}
-          required={required}
-          autoComplete="off"
-        />
-        {loading && <div className="autocomplete-loader">Searching...</div>}
+    <div className="relative w-full">
+      <label className="flex flex-col gap-1.5 w-full">
+        <span className="text-[0.7rem] font-bold uppercase tracking-wider text-muted px-1">{label}</span>
+        <div className="relative">
+          <input
+            className="w-full bg-white/60 border border-surface-border rounded-xl px-4 py-3 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-semibold placeholder:text-muted/40"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onFocus={() => {
+              if (suggestions.length > 0) setShow(true);
+            }}
+            onBlur={() => setTimeout(() => setShow(false), 200)}
+            placeholder={placeholder}
+            required={required}
+            autoComplete="off"
+          />
+          {loading && (
+            <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2 text-[0.65rem] font-bold text-teal bg-white/80 px-2 py-1 rounded-md">
+              <div className="w-2 h-2 rounded-full bg-teal animate-ping" />
+              Searching
+            </div>
+          )}
+        </div>
         {show && suggestions.length > 0 && (
-          <div className="autocomplete-dropdown">
+          <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-surface-border rounded-xl shadow-xl z-[100] max-h-60 overflow-y-auto overflow-x-hidden py-2 backdrop-blur-xl">
             {suggestions.map((item, index) => (
-              <div
+              <button
                 key={`${item.place_id}-${index}`}
-                className="autocomplete-item"
+                type="button"
+                className="w-full text-left px-4 py-2.5 text-sm text-ink hover:bg-teal/5 transition-colors border-b border-surface-border last:border-0"
                 onClick={() => {
                   onSelect({
                     name: item.display_name,
@@ -228,7 +243,7 @@ const LocationAutocomplete = ({
                 }}
               >
                 {item.display_name}
-              </div>
+              </button>
             ))}
           </div>
         )}
@@ -253,6 +268,175 @@ const getBoundingBox = (lat1?: string, lng1?: string, lat2?: string, lng2?: stri
   return `${minLng - pad},${maxLat + pad},${maxLng + pad},${minLat - pad}`;
 };
 
+const shortenLocationLabel = (value: string) => value.split(",").slice(0, 2).join(",").trim();
+
+const distanceFromRouteLine = (
+  point: { lat: number; lng: number },
+  start: { lat: number; lng: number },
+  end: { lat: number; lng: number },
+) => {
+  const x0 = point.lng;
+  const y0 = point.lat;
+  const x1 = start.lng;
+  const y1 = start.lat;
+  const x2 = end.lng;
+  const y2 = end.lat;
+  const denominator = Math.hypot(x2 - x1, y2 - y1);
+
+  if (!denominator) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return Math.abs((y2 - y1) * x0 - (x2 - x1) * y0 + x2 * y1 - y2 * x1) / denominator;
+};
+
+const distanceToSegment = (
+  p: { lat: number; lng: number },
+  v: { lat: number; lng: number },
+  w: { lat: number; lng: number }
+) => {
+  const l2 = (w.lng - v.lng) ** 2 + (w.lat - v.lat) ** 2;
+  if (l2 === 0) return Math.hypot(p.lng - v.lng, p.lat - v.lat);
+  let t = ((p.lng - v.lng) * (w.lng - v.lng) + (p.lat - v.lat) * (w.lat - v.lat)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const projection = {
+    lng: v.lng + t * (w.lng - v.lng),
+    lat: v.lat + t * (w.lat - v.lat)
+  };
+  return Math.hypot(p.lng - projection.lng, p.lat - projection.lat);
+};
+
+const distanceToPolyline = (
+  point: { lat: number; lng: number },
+  polyline: { lat: number; lng: number }[]
+) => {
+  let minDistance = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const dist = distanceToSegment(point, polyline[i], polyline[i + 1]);
+    if (dist < minDistance) minDistance = dist;
+  }
+  return minDistance;
+};
+
+const mergeSuggestedStops = (currentStops: EditableStop[], suggestedStops: EditableStop[]) => {
+  const nextStops = [...currentStops];
+  const seen = new Set(currentStops.map((stop) => stop.name.trim().toLowerCase()));
+
+  suggestedStops.forEach((stop) => {
+    const key = stop.name.trim().toLowerCase();
+    if (!key || seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    nextStops.push(stop);
+  });
+
+  return nextStops.map((stop, index) => ({
+    ...stop,
+    order: String(index + 1),
+  }));
+};
+
+const fetchSuggestedRouteStops = async ({
+  state,
+  startLat,
+  startLng,
+  endLat,
+  endLng,
+}: {
+  state?: string;
+  startLat: string;
+  startLng: string;
+  endLat: string;
+  endLng: string;
+}): Promise<EditableStop[]> => {
+  const viewbox = getBoundingBox(startLat, startLng, endLat, endLng);
+  if (!viewbox) {
+    return [];
+  }
+
+  const searchTerms = ["bus stop", "motor park", "terminal", "junction"];
+  const start = { lat: Number(startLat), lng: Number(startLng) };
+  const end = { lat: Number(endLat), lng: Number(endLng) };
+
+  let routePath: { lat: number; lng: number }[] = [];
+  try {
+    const osrmRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson`);
+    if (osrmRes.ok) {
+      const osrmData = await osrmRes.json();
+      if (osrmData.code === "Ok" && osrmData.routes && osrmData.routes.length > 0) {
+        routePath = osrmData.routes[0].geometry.coordinates.map((c: number[]) => ({
+          lng: c[0],
+          lat: c[1]
+        }));
+      }
+    }
+  } catch (error) {
+    console.error("Failed to fetch OSRM route for suggested stops", error);
+  }
+
+  const responses = await Promise.all(
+    searchTerms.map(async (term) => {
+      const url = new URL("https://nominatim.openstreetmap.org/search");
+      url.searchParams.set("q", `${term}${state ? `, ${state}, Nigeria` : ", Nigeria"}`);
+      url.searchParams.set("format", "json");
+      url.searchParams.set("limit", "8");
+      url.searchParams.set("addressdetails", "1");
+      url.searchParams.set("bounded", "1");
+      url.searchParams.set("countrycodes", "ng");
+      url.searchParams.set("viewbox", viewbox);
+
+      const response = await fetch(url.toString(), {
+        headers: {
+          "Accept-Language": "en",
+        },
+      });
+
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    }),
+  );
+
+  const deduped = new Map<string, EditableStop>();
+
+  responses.flat().forEach((item: any) => {
+    const lat = Number(item.lat);
+    const lng = Number(item.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return;
+    }
+
+    const dist = routePath.length > 1
+      ? distanceToPolyline({ lat, lng }, routePath)
+      : distanceFromRouteLine({ lat, lng }, start, end);
+
+    // 0.008 degrees is roughly 800m threshold on actual road path
+    const threshold = routePath.length > 1 ? 0.008 : 0.05;
+
+    if (dist > threshold) {
+      return;
+    }
+
+    const label = shortenLocationLabel(item.display_name);
+    const key = label.toLowerCase();
+    if (deduped.has(key)) {
+      return;
+    }
+
+    deduped.set(key, {
+      name: label,
+      lat: String(lat),
+      lng: String(lng),
+      order: String(deduped.size + 1),
+      enabled: true,
+    });
+  });
+
+  return Array.from(deduped.values()).slice(0, 8);
+};
+
 interface StateAutocompleteProps {
   value: string;
   onChange: (value: string) => void;
@@ -265,10 +449,11 @@ const StateAutocomplete = ({ value, onChange, required }: StateAutocompleteProps
   const filtered = NIGERIAN_STATES.filter((s) => s.toLowerCase().includes(searchValue.toLowerCase()));
 
   return (
-    <div className="location-autocomplete">
-      <label className="field">
-        <span>State</span>
+    <div className="relative w-full">
+      <label className="flex flex-col gap-1.5 w-full">
+        <span className="text-[0.7rem] font-bold uppercase tracking-wider text-muted px-1">State</span>
         <input
+          className="w-full bg-white/60 border border-surface-border rounded-xl px-4 py-3 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-semibold placeholder:text-muted/40"
           value={value}
           onChange={(e) => {
             onChange(e.target.value);
@@ -281,18 +466,19 @@ const StateAutocomplete = ({ value, onChange, required }: StateAutocompleteProps
           autoComplete="off"
         />
         {show && filtered.length > 0 && value.length > 0 && (
-          <div className="autocomplete-dropdown">
+          <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-surface-border rounded-xl shadow-xl z-[100] max-h-60 overflow-y-auto overflow-x-hidden py-2 backdrop-blur-xl">
             {filtered.map((s) => (
-              <div
+              <button
                 key={s}
-                className="autocomplete-item"
+                type="button"
+                className="w-full text-left px-4 py-2.5 text-sm text-ink hover:bg-teal/5 transition-colors border-b border-surface-border last:border-0"
                 onClick={() => {
                   onChange(s);
                   setShow(false);
                 }}
               >
                 {s}
-              </div>
+              </button>
             ))}
           </div>
         )}
@@ -301,48 +487,8 @@ const StateAutocomplete = ({ value, onChange, required }: StateAutocompleteProps
   );
 };
 
-interface RouteMapProps {
-  start?: [number, number];
-  end?: [number, number];
-  onPointSelect: (type: "start" | "end", lat: number, lng: number) => void;
-  mode: "start" | "end" | null;
-}
-
-const MapEvents = ({ onMapClick }: { onMapClick: (lat: number, lng: number) => void }) => {
-  useMapEvents({
-    click(e) {
-      onMapClick(e.latlng.lat, e.latlng.lng);
-    },
-  });
-  return null;
-};
-
-const RouteMap = ({ start, end, onPointSelect, mode }: RouteMapProps) => {
-  const center: [number, number] = start || end || [9.082, 8.6753]; // Nigeria center
-  const zoom = start || end ? 12 : 6;
-
-  return (
-    <div className="map-frame" style={{ height: "300px", marginTop: "1rem" }}>
-      <MapContainer center={center} zoom={zoom} scrollWheelZoom={false} className="map-canvas">
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
-        {mode && <MapEvents onMapClick={(lat, lng) => onPointSelect(mode, lat, lng)} />}
-        {start && <Marker position={start}><div className="map-pin map-pin-route">S</div></Marker>}
-        {end && <Marker position={end}><div className="map-pin map-pin-bus">E</div></Marker>}
-      </MapContainer>
-      {mode && (
-        <div className="inline-message inline-message-info" style={{ marginTop: "0.5rem" }}>
-          Click on the map to set <strong>{mode}</strong> location coordinates.
-        </div>
-      )}
-    </div>
-  );
-};
-
 export const AdminPage = () => {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<AdminTab>("routes");
   const [routes, setRoutes] = useState<RouteRecord[]>([]);
   const [buses, setBuses] = useState<Bus[]>([]);
@@ -360,10 +506,25 @@ export const AdminPage = () => {
   const [busyKey, setBusyKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
-  const [mapMode, setMapMode] = useState<"start" | "end" | null>(null);
+  const [routeStopsLoading, setRouteStopsLoading] = useState(false);
+  const [routeStopsMessage, setRouteStopsMessage] = useState<string | null>(null);
+  const [viewingRoute, setViewingRoute] = useState<RouteRecord | null>(null);
+  const [showRouteForm, setShowRouteForm] = useState(false);
+  const [showBusForm, setShowBusForm] = useState(false);
+  const [showDriverForm, setShowDriverForm] = useState(false);
+  const [showTripForm, setShowTripForm] = useState(false);
 
   const isAdmin1 = user?.role === "admin1";
   const currentUserId = getUserId(user);
+  const getTripCapacity = (trip: Trip): number | null =>
+    typeof trip.bus === "string" ? null : trip.bus.capacity;
+  const getBookedSeatCount = (trip: Trip): number | null => {
+    const capacity = getTripCapacity(trip);
+
+    return capacity === null ? null : Math.max(capacity - trip.availableSeats, 0);
+  };
+  const getBookingUserName = (booking: Booking): string =>
+    typeof booking.user === "string" ? "Anonymous Guest" : booking.user?.name || "Anonymous Guest";
 
   const refreshAll = async () => {
     try {
@@ -407,6 +568,56 @@ export const AdminPage = () => {
     return () => window.clearTimeout(timer);
   }, [banner]);
 
+  useEffect(() => {
+    if (!routeForm.startLat || !routeForm.startLng || !routeForm.endLat || !routeForm.endLng) {
+      return;
+    }
+
+    let active = true;
+
+    const loadSuggestedStops = async () => {
+      try {
+        setRouteStopsLoading(true);
+        setRouteStopsMessage(null);
+        const suggestedStops = await fetchSuggestedRouteStops({
+          state: routeForm.state,
+          startLat: routeForm.startLat,
+          startLng: routeForm.startLng,
+          endLat: routeForm.endLat,
+          endLng: routeForm.endLng,
+        });
+
+        if (!active) {
+          return;
+        }
+
+        setRouteForm((currentValue) => ({
+          ...currentValue,
+          stops: mergeSuggestedStops(currentValue.stops, suggestedStops),
+        }));
+        setRouteStopsMessage(
+          suggestedStops.length
+            ? `${suggestedStops.length} suggested stops loaded for this route.`
+            : "No suggested stops found yet. You can still save the route with just start and end.",
+        );
+      } catch {
+        if (active) {
+          setRouteStopsMessage("Unable to fetch suggested stops right now.");
+        }
+      } finally {
+        if (active) {
+          setRouteStopsLoading(false);
+        }
+      }
+    };
+
+    void loadSuggestedStops();
+
+    return () => {
+      active = false;
+    };
+  }, [routeForm.endLat, routeForm.endLng, routeForm.startLat, routeForm.startLng, routeForm.state]);
+
   const runAction = async (key: string, action: () => Promise<void>, successMessage: string) => {
     try {
       setBusyKey(key);
@@ -431,7 +642,7 @@ export const AdminPage = () => {
 
   const buildStops = () =>
     routeForm.stops
-      .filter((stop) => stop.name.trim())
+      .filter((stop) => stop.enabled && stop.name.trim())
       .map((stop, index) => ({
         name: stop.name.trim(),
         coordinates: {
@@ -441,6 +652,35 @@ export const AdminPage = () => {
         order: Number(stop.order) || index + 1,
       }));
 
+  const draftRoute = buildDraftRoute({
+    id: routeForm.editingId || "draft-route",
+    state: routeForm.state || undefined,
+    start:
+      routeForm.startName && routeForm.startLat && routeForm.startLng
+        ? {
+            name: routeForm.startName,
+            coordinates: {
+              lat: Number(routeForm.startLat),
+              lng: Number(routeForm.startLng),
+            },
+          }
+        : null,
+    end:
+      routeForm.endName && routeForm.endLat && routeForm.endLng
+        ? {
+            name: routeForm.endName,
+            coordinates: {
+              lat: Number(routeForm.endLat),
+              lng: Number(routeForm.endLng),
+            },
+          }
+        : null,
+    stops: buildStops(),
+    basePrice: routeForm.basePrice ? Number(routeForm.basePrice) : 0,
+    distanceKm: routeForm.distanceKm ? Number(routeForm.distanceKm) : 0,
+    estimatedDuration: routeForm.estimatedDuration ? Number(routeForm.estimatedDuration) : undefined,
+  });
+
   const submitRoute = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
@@ -448,21 +688,25 @@ export const AdminPage = () => {
       routeForm.editingId ? `route-update-${routeForm.editingId}` : "route-create",
       async () => {
         const payload = {
-          name: routeForm.name.trim(),
+          name:
+            routeForm.name.trim() ||
+            `${shortenLocationLabel(routeForm.startName)} to ${shortenLocationLabel(routeForm.endName)}`,
           state: routeForm.state.trim() || undefined,
           startLocation: {
             name: routeForm.startName.trim(),
-            coordinates: [Number(routeForm.startLng), Number(routeForm.startLat)] as [number, number],
+            coordinates: {
+              lat: Number(routeForm.startLat),
+              lng: Number(routeForm.startLng),
+            },
           },
           endLocation: {
             name: routeForm.endName.trim(),
-            coordinates: [Number(routeForm.endLng), Number(routeForm.endLat)] as [number, number],
+            coordinates: {
+              lat: Number(routeForm.endLat),
+              lng: Number(routeForm.endLng),
+            },
           },
-          stops: routeForm.stops.map((stop) => ({
-            name: stop.name.trim(),
-            coordinates: [Number(stop.lng), Number(stop.lat)] as [number, number],
-            order: Number(stop.order),
-          })),
+          stops: buildStops(),
           basePrice: Number(routeForm.basePrice),
           distanceKm: routeForm.distanceKm ? Number(routeForm.distanceKm) : undefined,
           estimatedDuration: routeForm.estimatedDuration ? Number(routeForm.estimatedDuration) : undefined,
@@ -486,11 +730,11 @@ export const AdminPage = () => {
       name: route.name,
       state: route.state || "",
       startName: route.startLocation.name,
-      startLat: String(route.startLocation.coordinates[1]),
-      startLng: String(route.startLocation.coordinates[0]),
+      startLat: String(route.startLocation.coordinates.lat),
+      startLng: String(route.startLocation.coordinates.lng),
       endName: route.endLocation.name,
-      endLat: String(route.endLocation.coordinates[1]),
-      endLng: String(route.endLocation.coordinates[0]),
+      endLat: String(route.endLocation.coordinates.lat),
+      endLng: String(route.endLocation.coordinates.lng),
       basePrice: String(route.basePrice),
       distanceKm: route.distanceKm ? String(route.distanceKm) : "",
       estimatedDuration: route.estimatedDuration ? String(route.estimatedDuration) : "",
@@ -498,12 +742,14 @@ export const AdminPage = () => {
         route.stops.length > 0
           ? route.stops.map((stop) => ({
               name: stop.name,
-              lat: String(stop.coordinates[1]),
-              lng: String(stop.coordinates[0]),
+              lat: String(stop.coordinates.lat),
+              lng: String(stop.coordinates.lng),
               order: String(stop.order),
+              enabled: true,
             }))
-          : [{ name: "", lat: "", lng: "", order: "1" }],
+          : [],
     });
+    setShowRouteForm(true);
   };
 
   const submitBus = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -544,9 +790,10 @@ export const AdminPage = () => {
       busModel: bus.busModel || "",
       capacity: String(bus.capacity),
       routeId: toId(bus.route),
-      driverId: toId(bus.driver),
+      driverId: bus.driver ? (typeof bus.driver === "string" ? bus.driver : bus.driver._id) : "",
       status: bus.status,
     });
+    setShowBusForm(true);
   };
 
   const submitDriver = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -588,6 +835,7 @@ export const AdminPage = () => {
       assignedBusId: toId(driver.assignedBus),
       status: driver.status || "available",
     });
+    setShowDriverForm(true);
   };
 
   const submitTrip = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -611,12 +859,16 @@ export const AdminPage = () => {
   };
 
   const tabButtons = (
-    <div className="admin-tabs">
+    <div className="flex flex-wrap gap-2 md:gap-3 p-1 rounded-lg bg-surface border border-surface-border/60">
       {tabs.map((tab) => (
         <button
           key={tab.id}
           type="button"
-          className={`admin-tab${activeTab === tab.id ? " is-active" : ""}`}
+          className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 ${
+            activeTab === tab.id 
+              ? "bg-teal text-white shadow-md shadow-teal/20" 
+              : "text-muted hover:text-ink hover:bg-white/50"
+          }`}
           onClick={() => setActiveTab(tab.id)}
         >
           {tab.label}
@@ -635,315 +887,261 @@ export const AdminPage = () => {
   ];
 
   const renderRoutes = () => (
-    <section className="panel admin-section">
-      <div className="section-head compact-head">
+    <section className="flex flex-col gap-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 bg-white p-6 rounded-2xl border border-surface-border shadow-sm">
         <div>
-          <span className="eyebrow">Route management</span>
-          <h2>Create and update active routes</h2>
+          <h2 className="text-2xl font-black text-ink">Network Configuration</h2>
+          <p className="text-sm text-muted mt-1 font-medium italic">Manage regional routes, pricing, and waypoint discovery.</p>
         </div>
+        <button 
+          onClick={() => {
+            if (showRouteForm) {
+                setRouteForm(emptyRouteForm);
+            }
+            setShowRouteForm(!showRouteForm);
+          }}
+          className={`px-6 py-3 rounded-xl font-black text-sm uppercase tracking-widest transition-all flex items-center gap-2 ${
+            showRouteForm 
+                ? "bg-muted/10 text-muted hover:bg-muted/20" 
+                : "bg-teal text-white shadow-lg shadow-teal/20 hover:scale-[1.02]"
+          }`}
+        >
+          {showRouteForm ? "Back to Network" : "Add New Route"}
+          {!showRouteForm && <HiOutlinePlus size={18} />}
+        </button>
       </div>
-      <div className="admin-grid">
-        <form className="form-stack panel inset-panel" onSubmit={submitRoute}>
-          <div className="admin-form-grid">
-            <label className="field">
-              <span>Route name</span>
-              <input
-                value={routeForm.name}
-                onChange={(event) => setRouteForm((value) => ({ ...value, name: event.target.value }))}
-                required
-              />
-            </label>
-            <StateAutocomplete
-              value={routeForm.state}
-              onChange={(val) => setRouteForm((v) => ({ ...v, state: val }))}
-              required
-            />
-            <label className="field">
-              <span>Base price</span>
-              <input
-                type="number"
-                min={0}
-                value={routeForm.basePrice}
-                onChange={(event) => setRouteForm((value) => ({ ...value, basePrice: event.target.value }))}
-                required
-              />
-            </label>
-            <label className="field">
-              <span>Distance (km)</span>
-              <input
-                type="number"
-                min={0}
-                step="0.1"
-                value={routeForm.distanceKm}
-                onChange={(event) => setRouteForm((value) => ({ ...value, distanceKm: event.target.value }))}
-              />
-            </label>
-            <label className="field">
-              <span>Duration (mins)</span>
-              <input
-                type="number"
-                min={1}
-                value={routeForm.estimatedDuration}
-                onChange={(event) => setRouteForm((value) => ({ ...value, estimatedDuration: event.target.value }))}
-              />
-            </label>
-          </div>
-          <div className="admin-form-grid">
-            <LocationAutocomplete
-              label="Start location"
-              value={routeForm.startName}
-              state={routeForm.state}
-              onChange={(val) => setRouteForm((v) => ({ ...v, startName: val }))}
-              onSelect={(item) =>
-                setRouteForm((v) => ({
-                  ...v,
-                  startName: item.name,
-                  startLat: item.lat,
-                  startLng: item.lng,
-                }))
-              }
-              required
-            />
-            <label className="field">
-              <span>Start latitude</span>
-              <div className="action-row action-row-wrap">
-                <input
-                  type="number"
-                  step="0.000001"
-                  value={routeForm.startLat}
-                  onChange={(event) => setRouteForm((value) => ({ ...value, startLat: event.target.value }))}
-                  required
-                />
-                <button
-                  type="button"
-                  className={`ghost-button compact-button ${mapMode === "start" ? "is-active" : ""}`}
-                  onClick={() => setMapMode(mapMode === "start" ? null : "start")}
-                >
-                  <HiOutlineMap />
-                  <span>{mapMode === "start" ? "Cancel" : "Pick"}</span>
-                </button>
-              </div>
-            </label>
-            <label className="field">
-              <span>Start longitude</span>
-              <input
-                type="number"
-                step="0.000001"
-                value={routeForm.startLng}
-                onChange={(event) => setRouteForm((value) => ({ ...value, startLng: event.target.value }))}
-                required
-              />
-            </label>
-          </div>
 
-          <div className="admin-form-grid">
-            <LocationAutocomplete
-              label="End location"
-              value={routeForm.endName}
-              state={routeForm.state}
-              onChange={(val) => setRouteForm((v) => ({ ...v, endName: val }))}
-              onSelect={(item) =>
-                setRouteForm((v) => ({
-                  ...v,
-                  endName: item.name,
-                  endLat: item.lat,
-                  endLng: item.lng,
-                }))
-              }
-              required
-            />
-            <label className="field">
-              <span>End latitude</span>
-              <div className="action-row action-row-wrap">
-                <input
-                  type="number"
-                  step="0.000001"
-                  value={routeForm.endLat}
-                  onChange={(event) => setRouteForm((value) => ({ ...value, endLat: event.target.value }))}
-                  required
-                />
-                <button
-                  type="button"
-                  className={`ghost-button compact-button ${mapMode === "end" ? "is-active" : ""}`}
-                  onClick={() => setMapMode(mapMode === "end" ? null : "end")}
-                >
-                  <HiOutlineMap />
-                  <span>{mapMode === "end" ? "Cancel" : "Pick"}</span>
-                </button>
-              </div>
-            </label>
-            <label className="field">
-              <span>End longitude</span>
-              <input
-                type="number"
-                step="0.000001"
-                value={routeForm.endLng}
-                onChange={(event) => setRouteForm((value) => ({ ...value, endLng: event.target.value }))}
-                required
-              />
-            </label>
-          </div>
-
-          <RouteMap
-            start={routeForm.startLat && routeForm.startLng ? [Number(routeForm.startLat), Number(routeForm.startLng)] : undefined}
-            end={routeForm.endLat && routeForm.endLng ? [Number(routeForm.endLat), Number(routeForm.endLng)] : undefined}
-            mode={mapMode}
-            onPointSelect={(type, lat, lng) => {
-              if (type === "start") {
-                setRouteForm((v) => ({ ...v, startLat: String(lat), startLng: String(lng) }));
-              } else {
-                setRouteForm((v) => ({ ...v, endLat: String(lat), endLng: String(lng) }));
-              }
-              setMapMode(null);
-            }}
-          />
-
-          <div className="admin-subsection">
-            <div className="section-head compact-head">
-              <h3>Stops</h3>
-              <button
-                type="button"
-                className="ghost-button compact-button"
-                onClick={() =>
-                  setRouteForm((value) => ({
-                    ...value,
-                    stops: [...value.stops, { name: "", lat: "", lng: "", order: String(value.stops.length + 1) }],
-                  }))
-                }
-              >
-                <HiOutlinePlus size={16} />
-                <span>Add stop</span>
-              </button>
-            </div>
-            <div className="admin-list-grid">
-              {routeForm.stops.map((stop, index) => (
-                <div key={`route-stop-${index}`} className="panel inset-panel admin-stop-card">
-                  <div className="admin-form-grid compact-grid">
-                    <LocationAutocomplete
-                      label="Stop name"
-                      value={stop.name}
-                      onChange={(val) =>
-                        setRouteForm((value) => ({
-                          ...value,
-                          stops: value.stops.map((s, itemIndex) =>
-                            itemIndex === index ? { ...s, name: val } : s,
-                          ),
-                        }))
-                      }
-                      onSelect={(selected) =>
-                        setRouteForm((value) => ({
-                          ...value,
-                          stops: value.stops.map((s, itemIndex) =>
-                            itemIndex === index ? { ...s, name: selected.name, lat: selected.lat, lng: selected.lng } : s,
-                          ),
-                        }))
-                      }
-                      viewbox={getBoundingBox(routeForm.startLat, routeForm.startLng, routeForm.endLat, routeForm.endLng)}
-                    />
-                    <label className="field">
-                      <span>Lat</span>
-                      <input
-                        type="number"
-                        step="0.000001"
-                        value={stop.lat}
-                        onChange={(event) =>
-                          setRouteForm((value) => ({
-                            ...value,
-                            stops: value.stops.map((item, itemIndex) =>
-                              itemIndex === index ? { ...item, lat: event.target.value } : item,
-                            ),
-                          }))
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Lng</span>
-                      <input
-                        type="number"
-                        step="0.000001"
-                        value={stop.lng}
-                        onChange={(event) =>
-                          setRouteForm((value) => ({
-                            ...value,
-                            stops: value.stops.map((item, itemIndex) =>
-                              itemIndex === index ? { ...item, lng: event.target.value } : item,
-                            ),
-                          }))
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Order</span>
-                      <input
-                        type="number"
-                        min={1}
-                        value={stop.order}
-                        onChange={(event) =>
-                          setRouteForm((value) => ({
-                            ...value,
-                            stops: value.stops.map((item, itemIndex) =>
-                              itemIndex === index ? { ...item, order: event.target.value } : item,
-                            ),
-                          }))
-                        }
-                      />
-                    </label>
-                  </div>
-                  {routeForm.stops.length > 1 ? (
-                    <button
-                      type="button"
-                      className="ghost-button compact-button"
-                      onClick={() =>
-                        setRouteForm((value) => ({
-                          ...value,
-                          stops: value.stops.filter((_, itemIndex) => itemIndex !== index),
-                        }))
-                      }
-                    >
-                      Remove stop
-                    </button>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="action-row">
-            <button type="submit" className="solid-button" disabled={busyKey.startsWith("route-")}>
-              {routeForm.editingId ? "Update route" : "Create route"}
-            </button>
-            {routeForm.editingId ? (
-              <button type="button" className="ghost-button" onClick={() => setRouteForm(emptyRouteForm)}>
-                Cancel edit
-              </button>
-            ) : null}
-          </div>
-        </form>
-
-        <div className="admin-list-grid">
-          {routes.map((route) => (
-            <article key={route._id} className="panel inset-panel admin-card">
-              <div className="trip-card-head">
+      {showRouteForm ? (
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_450px] gap-8 items-start animate-in zoom-in-95 duration-300">
+          <form className="flex flex-col gap-8 p-10 bg-white border border-surface-border rounded-2xl shadow-xl relative overflow-hidden" onSubmit={submitRoute}>
+            <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-teal to-teal-deep" />
+            
+            <div className="space-y-8">
                 <div>
-                  <strong>{route.name}</strong>
-                  <p>
-                    {route.startLocation.name} to {route.endLocation.name}
-                  </p>
+                    <h3 className="text-lg font-black text-ink mb-6 flex items-center gap-2">
+                        <div className="w-1.5 h-6 bg-teal rounded-full" />
+                        {routeForm.editingId ? "Edit Route Plan" : "New Route Specification"}
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <StateAutocomplete
+                            value={routeForm.state}
+                            onChange={(val) => setRouteForm((v) => ({ ...v, state: val }))}
+                            required
+                        />
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Base Price (₦)</span>
+                            <div className="relative">
+                                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-muted/40 font-bold">₦</span>
+                                <input
+                                    type="number"
+                                    min={0}
+                                    className="w-full bg-background border border-surface-border rounded-xl pl-10 pr-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold text-lg"
+                                    value={routeForm.basePrice}
+                                    onChange={(event) => setRouteForm((value) => ({ ...value, basePrice: event.target.value }))}
+                                    required
+                                    placeholder="0.00"
+                                />
+                            </div>
+                        </label>
+                    </div>
                 </div>
-                <StatusPill label={`${route.stops.length} stops`} tone="info" />
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="space-y-6">
+                        <LocationAutocomplete
+                            label="Start Terminal"
+                            value={routeForm.startName}
+                            state={routeForm.state}
+                            onChange={(val) => setRouteForm((v) => ({ ...v, startName: val }))}
+                            onSelect={(item) =>
+                                setRouteForm((v) => ({
+                                    ...v,
+                                    startName: item.name,
+                                    startLat: item.lat,
+                                    startLng: item.lng,
+                                }))
+                            }
+                            required
+                            placeholder="Search and select starting location"
+                        />
+                        <LocationAutocomplete
+                            label="End Terminal"
+                            value={routeForm.endName}
+                            state={routeForm.state}
+                            onChange={(val) => setRouteForm((v) => ({ ...v, endName: val }))}
+                            onSelect={(item) =>
+                                setRouteForm((v) => ({
+                                    ...v,
+                                    endName: item.name,
+                                    endLat: item.lat,
+                                    endLng: item.lng,
+                                }))
+                            }
+                            required
+                            placeholder="Search and select destination"
+                        />
+                    </div>
+                    
+                    <div className="bg-background rounded-2xl border border-dashed border-teal/30 p-8 flex flex-col items-center justify-center text-center gap-4 group">
+                        <div className="w-16 h-16 rounded-full bg-teal/5 flex items-center justify-center text-teal group-hover:bg-teal/10 transition-colors">
+                            <HiOutlineMap size={32} />
+                        </div>
+                        <div>
+                            <p className="text-sm font-bold text-ink">Geospatial Awareness</p>
+                            <p className="text-xs text-muted mt-1 leading-relaxed">Coordinates and distance are automatically synchronized with our mapping engine.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div className="p-8 rounded-2xl bg-background border border-surface-border shadow-inner">
+                <div className="flex items-center justify-between mb-4">
+                    <span className="text-xs font-bold uppercase tracking-widest text-teal-deep font-bold">Live Path Visualization</span>
+                    <StatusPill
+                        label={`${buildStops().length} Selected Waypoints`}
+                        tone={buildStops().length ? "success" : "info"}
+                    />
+                </div>
+                <TransitMap route={draftRoute} />
+            </div>
+
+            <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h3 className="text-md font-bold text-ink">Waypoint Discovery</h3>
+                        <p className="text-xs text-muted font-medium mt-1 italic">Automatically detected transit points along the road network.</p>
+                    </div>
+                    {routeStopsLoading && <div className="w-5 h-5 rounded-full border-2 border-teal/20 border-t-teal animate-spin" />}
+                </div>
+
+                {routeStopsMessage && (
+                    <div className="p-4 rounded-xl bg-teal/5 border border-teal/10 text-xs font-bold text-teal-deep flex items-center gap-3">
+                        <div className="w-2 h-2 rounded-full bg-teal animate-pulse" />
+                        {routeStopsMessage}
+                    </div>
+                )}
+                
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {routeForm.stops.map((stop, index) => (
+                        <div key={`route-stop-${index}`} className={`p-4 rounded-xl border transition-all duration-300 flex items-center justify-between gap-4 ${
+                            stop.enabled ? "bg-white border-teal/20 shadow-sm" : "bg-transparent border-surface-border/40 opacity-40 grayscale pointer-events-none"
+                        }`}>
+                            <div className="flex flex-col min-w-0">
+                                <strong className="text-sm font-bold text-ink truncate" title={stop.name}>{shortLocationName(stop.name)}</strong>
+                                <span className="text-[0.65rem] font-mono text-muted mt-0.5">{Number(stop.lat).toFixed(4)}, {Number(stop.lng).toFixed(4)}</span>
+                            </div>
+                            <button
+                                type="button"
+                                className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all flex-shrink-0 ${
+                                    stop.enabled ? "bg-rose-50 text-rose-500 hover:bg-rose-500 hover:text-white" : "bg-teal text-white hover:bg-teal-deep"
+                                }`}
+                                style={{ pointerEvents: 'auto' }}
+                                onClick={() =>
+                                    setRouteForm((value) => ({
+                                        ...value,
+                                        stops: value.stops.map((item, itemIndex) =>
+                                            itemIndex === index ? { ...item, enabled: !item.enabled } : item,
+                                        ),
+                                    }))
+                                }
+                            >
+                                <HiOutlinePlus className={stop.enabled ? "rotate-45" : ""} size={20} />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            <div className="flex items-center gap-4 pt-6 mt-6 border-t border-surface-border">
+                <button 
+                    type="submit" 
+                    className="flex-1 px-8 py-4 rounded-xl bg-ink text-white font-black text-sm uppercase tracking-widest shadow-xl hover:bg-black transition-all disabled:opacity-50" 
+                    disabled={busyKey.startsWith("route-")}
+                >
+                    {routeForm.editingId ? "Commit Changes" : "Deploy Network Route"}
+                </button>
+                <button 
+                    type="button" 
+                    className="px-8 py-4 rounded-xl bg-white border border-surface-border text-ink font-bold text-sm shadow-sm hover:bg-background transition-colors" 
+                    onClick={() => {
+                        setRouteForm(emptyRouteForm);
+                        setShowRouteForm(false);
+                    }}
+                >
+                    Cancel
+                </button>
+            </div>
+          </form>
+
+          <aside className="bg-teal-deep/5 rounded-2xl p-8 border border-teal/5 flex flex-col gap-6 sticky top-6">
+            <h4 className="text-xs font-black uppercase tracking-widest text-teal-deep">Route Summary</h4>
+            <div className="space-y-6">
+                <div className="flex items-center justify-between py-3 border-b border-teal/10">
+                    <span className="text-sm font-bold text-muted">Estimated Distance</span>
+                    <span className="text-sm font-black text-ink">{routeForm.distanceKm || "AUTO"} KM</span>
+                </div>
+                <div className="flex items-center justify-between py-3 border-b border-teal/10">
+                    <span className="text-sm font-bold text-muted">Avg. Duration</span>
+                    <span className="text-sm font-black text-ink">{routeForm.estimatedDuration || "AUTO"} MIN</span>
+                </div>
+                <div className="flex items-center justify-between py-3 border-b border-teal/10">
+                    <span className="text-sm font-bold text-muted">Ticket Basis</span>
+                    <span className="text-sm font-black text-ink">{formatCurrency(Number(routeForm.basePrice) || 0)}</span>
+                </div>
+            </div>
+            <div className="mt-4 p-4 rounded-xl bg-white/50 border border-white text-xs text-muted leading-relaxed italic">
+                Pro Tip: Use the map discovery tool to automatically identify major junctions and motor parks along the highway.
+            </div>
+          </aside>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+          {routes.map((route) => (
+            <article key={route._id} className="group p-8 rounded-2xl bg-white border border-surface-border shadow-sm hover:border-teal/50 hover:shadow-xl transition-all duration-300 flex flex-col gap-6 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-24 h-24 bg-teal/5 rounded-bl-full -mr-8 -mt-8 group-hover:bg-teal/10 transition-colors" />
+              
+              <div className="flex items-start justify-between relative">
+                <div className="max-w-[70%]">
+                  <h3 className="text-lg font-black text-ink leading-tight group-hover:text-teal transition-colors truncate" title={route.name}>{route.name}</h3>
+                  <div className="flex items-center gap-2 mt-2">
+                    <div className="px-2 py-0.5 rounded bg-background border border-surface-border text-[0.6rem] font-black uppercase tracking-widest text-muted">{route.state || "Regional"}</div>
+                    <StatusPill label={`${route.stops.length} STOPS`} tone="info" />
+                  </div>
+                </div>
+                <div className="text-right">
+                    <span className="block text-xs font-bold text-muted uppercase tracking-widest">Base Fare</span>
+                    <span className="text-xl font-black text-teal-deep leading-none">{formatCurrency(route.basePrice)}</span>
+                </div>
               </div>
-              <div className="trip-meta-grid detail-meta-grid">
-                <span>{route.distanceKm} km</span>
-                <span>{formatCurrency(route.basePrice)}</span>
+
+              <div className="flex items-center justify-between p-4 bg-background rounded-xl border border-surface-border/50 text-xs font-bold text-ink/70">
+                <div className="flex flex-col gap-1">
+                    <span className="text-muted/60 uppercase tracking-tighter text-[0.6rem]">Terminal A</span>
+                    <span className="truncate w-24" title={route.startLocation.name}>{shortLocationName(route.startLocation.name)}</span>
+                </div>
+                <div className="w-8 h-px bg-surface-border relative">
+                    <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="w-1.5 h-1.5 rounded-full bg-teal shadow-[0_0_8px_rgba(20,184,166,0.5)]" />
+                    </div>
+                </div>
+                <div className="flex flex-col gap-1 text-right">
+                    <span className="text-muted/60 uppercase tracking-tighter text-[0.6rem]">Terminal B</span>
+                    <span className="truncate w-24" title={route.endLocation.name}>{shortLocationName(route.endLocation.name)}</span>
+                </div>
               </div>
-              <div className="action-row">
-                <button type="button" className="ghost-button compact-button" onClick={() => beginRouteEdit(route)}>
-                  Edit
+
+              <div className="flex items-center gap-3 mt-2">
+                <button 
+                  type="button" 
+                  className="flex-1 py-3.5 rounded-xl bg-teal/5 text-teal text-xs font-black uppercase tracking-widest hover:bg-teal hover:text-white transition-all shadow-sm active:scale-95" 
+                  onClick={() => beginRouteEdit(route)}
+                >
+                  Configure
                 </button>
                 {isAdmin1 ? (
                   <button
                     type="button"
-                    className="ghost-button compact-button"
+                    className="px-4 py-3.5 rounded-xl bg-rose-50 text-rose-500 hover:bg-rose-500 hover:text-white transition-all active:scale-95 disabled:opacity-30"
                     disabled={busyKey === `route-delete-${route._id}`}
                     onClick={() =>
                       void runAction(`route-delete-${route._id}`, async () => {
@@ -951,372 +1149,778 @@ export const AdminPage = () => {
                       }, "Route deactivated.")
                     }
                   >
-                    Deactivate
+                    <HiOutlineClock className="rotate-45" size={18} />
                   </button>
                 ) : null}
               </div>
             </article>
           ))}
+          {routes.length === 0 && (
+            <div className="col-span-full p-20 bg-background rounded-3xl border-2 border-dashed border-surface-border text-center flex flex-col items-center gap-4">
+                <div className="w-20 h-20 rounded-full bg-surface border border-surface-border flex items-center justify-center text-muted/30">
+                    <HiOutlineMap size={48} />
+                </div>
+                <div>
+                   <h3 className="text-xl font-black text-ink">No Routes Found</h3>
+                   <p className="text-sm text-muted mt-2">Start by creating your first regional network route using the button above.</p>
+                </div>
+            </div>
+          )}
         </div>
-      </div>
+      )}
     </section>
   );
 
   const renderBuses = () => (
-    <section className="panel admin-section">
-      <div className="section-head compact-head">
+    <section className="flex flex-col gap-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 bg-white p-6 rounded-2xl border border-surface-border shadow-sm">
         <div>
-          <span className="eyebrow">Bus management</span>
-          <h2>Create, update, and decommission buses</h2>
+          <h2 className="text-2xl font-black text-ink">Fleet Inventory</h2>
+          <p className="text-sm text-muted mt-1 font-medium italic">Monitor vehicle status, capacity, and asset assignments.</p>
         </div>
+        <button 
+          onClick={() => {
+            if (showBusForm) {
+                setBusForm(emptyBusForm);
+            }
+            setShowBusForm(!showBusForm);
+          }}
+          className={`px-6 py-3 rounded-xl font-black text-sm uppercase tracking-widest transition-all flex items-center gap-2 ${
+            showBusForm 
+                ? "bg-muted/10 text-muted hover:bg-muted/20" 
+                : "bg-teal text-white shadow-lg shadow-teal/20 hover:scale-[1.02]"
+          }`}
+        >
+          {showBusForm ? "Back to Fleet" : "Register New Bus"}
+          {!showBusForm && <HiOutlinePlus size={18} />}
+        </button>
       </div>
-      <div className="admin-grid">
-        <form className="form-stack panel inset-panel" onSubmit={submitBus}>
-          <div className="admin-form-grid">
-            <label className="field">
-              <span>Plate number</span>
-              <input value={busForm.plateNumber} onChange={(event) => setBusForm((value) => ({ ...value, plateNumber: event.target.value }))} required />
-            </label>
-            <label className="field">
-              <span>Bus model</span>
-              <input value={busForm.busModel} onChange={(event) => setBusForm((value) => ({ ...value, busModel: event.target.value }))} />
-            </label>
-            <label className="field">
-              <span>Capacity</span>
-              <input type="number" min={1} value={busForm.capacity} onChange={(event) => setBusForm((value) => ({ ...value, capacity: event.target.value }))} required />
-            </label>
-            <label className="field">
-              <span>Status</span>
-              <select value={busForm.status} onChange={(event) => setBusForm((value) => ({ ...value, status: event.target.value as Bus["status"] }))}>
-                <option value="active">Active</option>
-                <option value="maintenance">Maintenance</option>
-                <option value="offline">Offline</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Route</span>
-              <select value={busForm.routeId} onChange={(event) => setBusForm((value) => ({ ...value, routeId: event.target.value }))}>
-                <option value="">No route</option>
-                {routes.map((route) => (
-                  <option key={route._id} value={route._id}>
-                    {route.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Driver</span>
-              <select value={busForm.driverId} onChange={(event) => setBusForm((value) => ({ ...value, driverId: event.target.value }))}>
-                <option value="">No driver</option>
-                {drivers.map((driver) => (
-                  <option key={driver._id} value={driver._id}>
-                    {driver.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="action-row">
-            <button type="submit" className="solid-button" disabled={busyKey.startsWith("bus-")}>
-              {busForm.editingId ? "Update bus" : "Create bus"}
-            </button>
-            {busForm.editingId ? (
-              <button type="button" className="ghost-button" onClick={() => setBusForm(emptyBusForm)}>
-                Cancel edit
-              </button>
-            ) : null}
-          </div>
-        </form>
 
-        <div className="admin-list-grid">
-          {buses.map((bus) => (
-            <article key={bus._id} className="panel inset-panel admin-card">
-              <div className="trip-card-head">
-                <div>
-                  <strong>{busLabel(bus)}</strong>
-                  <p>{routeName(bus.route)}</p>
+      {showBusForm ? (
+        <div className="animate-in zoom-in-95 duration-300">
+          <form className="flex flex-col gap-8 p-10 bg-white border border-surface-border rounded-2xl shadow-xl relative overflow-hidden max-w-4xl mx-auto" onSubmit={submitBus}>
+            <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-teal to-teal-deep" />
+            
+            <h3 className="text-xl font-black text-ink flex items-center gap-3">
+                <div className="w-1.5 h-6 bg-teal rounded-full" />
+                {busForm.editingId ? "Update Vehicle Record" : "New Fleet Entry"}
+            </h3>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="space-y-6">
+                    <label className="flex flex-col gap-2">
+                        <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Plate Number</span>
+                        <input 
+                            className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-black text-xl uppercase placeholder:normal-case tracking-widest"
+                            placeholder="ABC-123-XY"
+                            value={busForm.plateNumber} 
+                            onChange={(event) => setBusForm((value) => ({ ...value, plateNumber: event.target.value }))} 
+                            required 
+                        />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                        <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Bus Model / Type</span>
+                        <input 
+                            className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold"
+                            placeholder="e.g. Toyota Coaster 2024"
+                            value={busForm.busModel} 
+                            onChange={(event) => setBusForm((value) => ({ ...value, busModel: event.target.value }))} 
+                        />
+                    </label>
                 </div>
-                <StatusPill label={capitalize(bus.status)} tone={bus.status === "active" ? "success" : "warning"} />
-              </div>
-              <div className="trip-meta-grid detail-meta-grid">
-                <span>{bus.capacity} seats</span>
-                <span>{typeof bus.driver === "string" ? "Driver assigned" : bus.driver?.name || "No driver"}</span>
-              </div>
-              <div className="action-row">
-                <button type="button" className="ghost-button compact-button" onClick={() => beginBusEdit(bus)}>
-                  Edit
+
+                <div className="space-y-6">
+                    <div className="grid grid-cols-2 gap-6">
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Max Capacity</span>
+                            <div className="relative">
+                                <input 
+                                    type="number" 
+                                    min={1} 
+                                    className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-black text-xl"
+                                    value={busForm.capacity} 
+                                    onChange={(event) => setBusForm((value) => ({ ...value, capacity: event.target.value }))} 
+                                    required 
+                                />
+                                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-muted/60 font-bold uppercase text-[0.6rem] tracking-widest">Seats</span>
+                            </div>
+                        </label>
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Asset Status</span>
+                            <select 
+                                className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold appearance-none cursor-pointer"
+                                value={busForm.status} 
+                                onChange={(event) => setBusForm((value) => ({ ...value, status: event.target.value as Bus["status"] }))}
+                            >
+                                <option value="active">Operational</option>
+                                <option value="maintenance">Maintenance</option>
+                                <option value="offline">Standby</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <div className="p-6 rounded-2xl bg-teal-deep/5 border border-teal/10 flex items-center gap-4">
+                        <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center text-teal shadow-soft">
+                            <HiOutlineTruck size={24} />
+                        </div>
+                        <p className="text-xs text-teal-deep font-bold leading-relaxed">Status updates are reflected across the booking engine immediately.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-4 border-t border-surface-border">
+                <label className="flex flex-col gap-2">
+                    <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Assigned Route</span>
+                    <select 
+                        className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold appearance-none cursor-pointer"
+                        value={busForm.routeId} 
+                        onChange={(event) => setBusForm((value) => ({ ...value, routeId: event.target.value }))}
+                    >
+                        <option value="">Unassigned (Floating Unit)</option>
+                        {routes.map((route) => (
+                          <option key={route._id} value={route._id}>
+                            {route.name}
+                          </option>
+                        ))}
+                    </select>
+                </label>
+                <label className="flex flex-col gap-2">
+                    <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Primary Operator</span>
+                    <select 
+                        className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold appearance-none cursor-pointer"
+                        value={busForm.driverId} 
+                        onChange={(event) => setBusForm((value) => ({ ...value, driverId: event.target.value }))}
+                    >
+                        <option value="">Unassigned (Pool Driver)</option>
+                        {drivers.map((driver) => (
+                          <option key={driver._id} value={driver._id}>
+                            {driver.name}
+                          </option>
+                        ))}
+                    </select>
+                </label>
+            </div>
+
+            <div className="flex items-center gap-4 pt-6 mt-4 border-t border-surface-border">
+                <button 
+                    type="submit" 
+                    className="flex-1 px-8 py-4 rounded-xl bg-ink text-white font-black text-sm uppercase tracking-widest shadow-xl hover:bg-black transition-all disabled:opacity-50" 
+                    disabled={busyKey.startsWith("bus-")}
+                >
+                    {busForm.editingId ? "Commit Asset Changes" : "Register Fleet Asset"}
                 </button>
-                {isAdmin1 ? (
-                  <button
-                    type="button"
-                    className="ghost-button compact-button"
-                    disabled={busyKey === `bus-delete-${bus._id}`}
-                    onClick={() =>
-                      void runAction(`bus-delete-${bus._id}`, async () => {
-                        await decommissionBusRequest(bus._id);
-                      }, "Bus decommissioned.")
-                    }
-                  >
-                    Decommission
-                  </button>
-                ) : null}
-              </div>
+                <button 
+                    type="button" 
+                    className="px-8 py-4 rounded-xl bg-white border border-surface-border text-ink font-bold text-sm shadow-sm hover:bg-background transition-colors" 
+                    onClick={() => {
+                        setBusForm(emptyBusForm);
+                        setShowBusForm(false);
+                    }}
+                >
+                    Cancel
+                </button>
+            </div>
+          </form>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+          {buses.map((bus) => (
+            <article key={bus._id} className="group p-8 rounded-2xl bg-white border border-surface-border shadow-sm hover:border-teal/50 hover:shadow-xl transition-all duration-300 flex flex-col gap-6 relative overflow-hidden">
+               <div className={`absolute top-0 right-0 w-32 h-32 rounded-bl-full -mr-12 -mt-12 transition-colors ${
+                   bus.status === "active" ? "bg-teal/5 group-hover:bg-teal/10" : "bg-rose-500/5 group-hover:bg-rose-500/10"
+               }`} />
+               
+               <div className="flex items-start justify-between relative">
+                    <div className="flex flex-col">
+                        <h3 className="text-lg font-black text-ink tracking-widest uppercase mb-1">{bus.plateNumber}</h3>
+                        <span className="text-xs font-bold text-muted uppercase tracking-widest">{bus.busModel || "Standard Carrier"}</span>
+                    </div>
+                    <StatusPill label={capitalize(bus.status)} tone={bus.status === "active" ? "success" : "warning"} />
+               </div>
+
+               <div className="flex flex-col gap-4 py-4 border-y border-surface-border/50 bg-background/50 rounded-xl px-4">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-xs font-bold text-muted">
+                            <HiOutlineMap size={14} className="text-teal" />
+                            <span>Route Path</span>
+                        </div>
+                        <span className="text-xs font-black text-ink truncate w-32 text-right tracking-tight">{routeName(bus.route)}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-xs font-bold text-muted">
+                            <HiOutlineUserCircle size={14} className="text-teal" />
+                            <span>Operator</span>
+                        </div>
+                        <span className="text-xs font-black text-ink truncate w-32 text-right tracking-tight">{typeof bus.driver === "string" ? "Linked" : bus.driver?.name || "No Driver"}</span>
+                    </div>
+               </div>
+
+               <div className="flex items-end justify-between">
+                    <div className="flex flex-col">
+                        <span className="text-[0.6rem] font-black uppercase tracking-widest text-muted/60 mb-1">Asset Capacity</span>
+                        <div className="flex items-center gap-1.5">
+                            <strong className="text-2xl font-black text-ink leading-none">{bus.capacity}</strong>
+                            <span className="text-[0.65rem] font-bold text-muted uppercase tracking-tight">Units</span>
+                        </div>
+                    </div>
+                    <div className="flex gap-2">
+                        <button 
+                            type="button" 
+                            className="w-10 h-10 rounded-xl bg-teal/5 text-teal flex items-center justify-center hover:bg-teal hover:text-white transition-all shadow-sm active:scale-95" 
+                            onClick={() => beginBusEdit(bus)}
+                        >
+                            <HiOutlineTruck size={18} />
+                        </button>
+                        {isAdmin1 ? (
+                            <button
+                                type="button"
+                                className="w-10 h-10 rounded-xl bg-background border border-surface-border text-rose-500 flex items-center justify-center hover:bg-rose-500 hover:text-white transition-all active:scale-95"
+                                disabled={busyKey === `bus-delete-${bus._id}`}
+                                onClick={() =>
+                                void runAction(`bus-delete-${bus._id}`, async () => {
+                                    await decommissionBusRequest(bus._id);
+                                }, "Bus decommissioned.")
+                                }
+                            >
+                                <HiOutlinePlus className="rotate-45" size={18} />
+                            </button>
+                        ) : null}
+                    </div>
+               </div>
             </article>
           ))}
+          {buses.length === 0 && (
+             <div className="col-span-full p-20 bg-background rounded-3xl border-2 border-dashed border-surface-border text-center flex flex-col items-center gap-4">
+                 <div className="w-20 h-20 rounded-full bg-surface border border-surface-border flex items-center justify-center text-muted/30">
+                     <HiOutlineTruck size={48} />
+                 </div>
+                 <div>
+                    <h3 className="text-xl font-black text-ink">Empty Garage</h3>
+                    <p className="text-sm text-muted mt-2">Registers your first fleet vehicle to start operational scheduling.</p>
+                 </div>
+             </div>
+          )}
         </div>
-      </div>
+      )}
     </section>
   );
 
   const renderDrivers = () => (
-    <section className="panel admin-section">
-      <div className="section-head compact-head">
+    <section className="flex flex-col gap-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 bg-white p-6 rounded-2xl border border-surface-border shadow-sm">
         <div>
-          <span className="eyebrow">Driver management</span>
-          <h2>Manage drivers and assignments</h2>
+          <h2 className="text-2xl font-black text-ink">Driver Registry</h2>
+          <p className="text-sm text-muted mt-1 font-medium italic">Validate credentials, monitor status, and manage operator pairings.</p>
         </div>
+        <button 
+          onClick={() => {
+            if (showDriverForm) {
+                setDriverForm(emptyDriverForm);
+            }
+            setShowDriverForm(!showDriverForm);
+          }}
+          className={`px-6 py-3 rounded-xl font-black text-sm uppercase tracking-widest transition-all flex items-center gap-2 ${
+            showDriverForm 
+                ? "bg-muted/10 text-muted hover:bg-muted/20" 
+                : "bg-teal text-white shadow-lg shadow-teal/20 hover:scale-[1.02]"
+          }`}
+        >
+          {showDriverForm ? "Back to Registry" : "Add New Driver"}
+          {!showDriverForm && <HiOutlinePlus size={18} />}
+        </button>
       </div>
-      <div className="admin-grid">
-        <form className="form-stack panel inset-panel" onSubmit={submitDriver}>
-          <div className="admin-form-grid">
-            <label className="field">
-              <span>Name</span>
-              <input value={driverForm.name} onChange={(event) => setDriverForm((value) => ({ ...value, name: event.target.value }))} required />
-            </label>
-            <label className="field">
-              <span>Phone number</span>
-              <input value={driverForm.phoneNumber} onChange={(event) => setDriverForm((value) => ({ ...value, phoneNumber: event.target.value }))} />
-            </label>
-            <label className="field">
-              <span>License number</span>
-              <input value={driverForm.licenseNumber} onChange={(event) => setDriverForm((value) => ({ ...value, licenseNumber: event.target.value }))} required />
-            </label>
-            <label className="field">
-              <span>Status</span>
-              <select value={driverForm.status} onChange={(event) => setDriverForm((value) => ({ ...value, status: event.target.value as NonNullable<Driver["status"]> }))}>
-                <option value="available">Available</option>
-                <option value="on_trip">On trip</option>
-                <option value="offline">Offline</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Assigned bus</span>
-              <select value={driverForm.assignedBusId} onChange={(event) => setDriverForm((value) => ({ ...value, assignedBusId: event.target.value }))}>
-                <option value="">No bus</option>
-                {buses.map((bus) => (
-                  <option key={bus._id} value={bus._id}>
-                    {bus.plateNumber}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="action-row">
-            <button type="submit" className="solid-button" disabled={busyKey.startsWith("driver-")}>
-              {driverForm.editingId ? "Update driver" : "Create driver"}
-            </button>
-            {driverForm.editingId ? (
-              <button type="button" className="ghost-button" onClick={() => setDriverForm(emptyDriverForm)}>
-                Cancel edit
-              </button>
-            ) : null}
-          </div>
-        </form>
 
-        <div className="admin-list-grid">
-          {drivers.map((driver) => (
-            <article key={driver._id} className="panel inset-panel admin-card">
-              <div className="trip-card-head">
-                <div>
-                  <strong>{driver.name}</strong>
-                  <p>{driver.licenseNumber || "No license number"}</p>
+      {showDriverForm ? (
+        <div className="animate-in zoom-in-95 duration-300">
+           <form className="flex flex-col gap-8 p-10 bg-white border border-surface-border rounded-2xl shadow-xl relative overflow-hidden max-w-4xl mx-auto" onSubmit={submitDriver}>
+                <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-teal to-teal-deep" />
+                
+                <h3 className="text-xl font-black text-ink flex items-center gap-3">
+                    <div className="w-1.5 h-6 bg-teal rounded-full" />
+                    {driverForm.editingId ? "Modify Staff Record" : "New Staff Onboarding"}
+                </h3>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="space-y-6">
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Full Legal Name</span>
+                            <div className="relative">
+                                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-teal/40"><HiOutlineUserCircle size={20} /></span>
+                                <input 
+                                    className="w-full bg-background border border-surface-border rounded-xl pl-12 pr-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold text-lg"
+                                    placeholder="e.g. Samuel Adekunle"
+                                    value={driverForm.name} 
+                                    onChange={(event) => setDriverForm((value) => ({ ...value, name: event.target.value }))} 
+                                    required 
+                                />
+                            </div>
+                        </label>
+                        <label className="flex flex-col gap-2">
+                             <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Contact Phone</span>
+                             <input 
+                                className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold"
+                                placeholder="+234 (0) ..."
+                                value={driverForm.phoneNumber} 
+                                onChange={(event) => setDriverForm((value) => ({ ...value, phoneNumber: event.target.value }))} 
+                            />
+                        </label>
+                    </div>
+
+                    <div className="space-y-6">
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">VIO License Number</span>
+                            <input 
+                                className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-black text-lg uppercase tracking-widest"
+                                placeholder="LIC-XXXXXXXX"
+                                value={driverForm.licenseNumber} 
+                                onChange={(event) => setDriverForm((value) => ({ ...value, licenseNumber: event.target.value }))} 
+                                required 
+                            />
+                        </label>
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Duty Status</span>
+                            <select 
+                                className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold appearance-none cursor-pointer"
+                                value={driverForm.status} 
+                                onChange={(event) => setDriverForm((value) => ({ ...value, status: event.target.value as NonNullable<Driver["status"]> }))}
+                            >
+                                <option value="available">Available (Active)</option>
+                                <option value="on_trip">On Active Assignment</option>
+                                <option value="offline">Off-Duty / Suspended</option>
+                            </select>
+                        </label>
+                    </div>
                 </div>
-                <StatusPill label={driver.status || "available"} tone={driver.status === "offline" ? "warning" : "success"} />
-              </div>
-              <div className="trip-meta-grid detail-meta-grid">
-                <span>{driver.phoneNumber || "No phone"}</span>
-                <span>{typeof driver.assignedBus === "string" ? "Assigned bus" : driver.assignedBus?.plateNumber || "Unassigned"}</span>
-              </div>
-              <div className="action-row">
-                <button type="button" className="ghost-button compact-button" onClick={() => beginDriverEdit(driver)}>
-                  Edit
-                </button>
-                {isAdmin1 ? (
-                  <button
-                    type="button"
-                    className="ghost-button compact-button"
-                    disabled={busyKey === `driver-delete-${driver._id}`}
-                    onClick={() =>
-                      void runAction(`driver-delete-${driver._id}`, async () => {
-                        await deleteDriverRequest(driver._id);
-                      }, "Driver deleted.")
-                    }
-                  >
-                    Delete
-                  </button>
-                ) : null}
-              </div>
+
+                <div className="pt-4 border-t border-surface-border">
+                    <label className="flex flex-col gap-2 max-w-md">
+                        <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Assigned Vehicle (Asset)</span>
+                        <select 
+                            className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold appearance-none cursor-pointer"
+                            value={driverForm.assignedBusId} 
+                            onChange={(event) => setDriverForm((value) => ({ ...value, assignedBusId: event.target.value }))}
+                        >
+                            <option value="">No Active Assignment</option>
+                            {buses.map((bus) => (
+                              <option key={bus._id} value={bus._id}>
+                                {bus.plateNumber} — {bus.busModel || "Carrier"}
+                              </option>
+                            ))}
+                        </select>
+                    </label>
+                </div>
+
+                <div className="flex items-center gap-4 pt-6 mt-4 border-t border-surface-border">
+                    <button 
+                        type="submit" 
+                        className="flex-1 px-8 py-4 rounded-xl bg-ink text-white font-black text-sm uppercase tracking-widest shadow-xl hover:bg-black transition-all disabled:opacity-50" 
+                        disabled={busyKey.startsWith("driver-")}
+                    >
+                        {driverForm.editingId ? "Save Staff Profile" : "Onboard Staff Member"}
+                    </button>
+                    <button 
+                        type="button" 
+                        className="px-8 py-4 rounded-xl bg-white border border-surface-border text-ink font-bold text-sm shadow-sm hover:bg-background transition-colors" 
+                        onClick={() => {
+                            setDriverForm(emptyDriverForm);
+                            setShowDriverForm(false);
+                        }}
+                    >
+                        Cancel
+                    </button>
+                </div>
+           </form>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+          {drivers.map((driver) => (
+            <article key={driver._id} className="group p-8 rounded-2xl bg-white border border-surface-border shadow-sm hover:border-teal/50 hover:shadow-xl transition-all duration-300 flex flex-col gap-6 relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-teal/5 rounded-bl-full -mr-8 -mt-8 group-hover:bg-teal/10 transition-colors" />
+                
+                <div className="flex items-start justify-between relative">
+                    <div className="w-12 h-12 rounded-full bg-teal/10 border-2 border-white shadow-soft flex items-center justify-center text-teal-deep font-black text-lg">
+                        {driver.name.charAt(0)}
+                    </div>
+                    <StatusPill label={driver.status || "available"} tone={driver.status === "offline" ? "warning" : "success"} />
+                </div>
+
+                <div className="flex flex-col">
+                    <h3 className="text-lg font-black text-ink leading-tight group-hover:text-teal transition-colors truncate mb-1">{driver.name}</h3>
+                    <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono text-muted/60">{driver.licenseNumber || "ID PENDING"}</span>
+                        <div className="w-1 h-1 rounded-full bg-teal/30" />
+                        <span className="text-xs font-bold text-teal tracking-tight">{driver.phoneNumber || "NO CONTACT"}</span>
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-4 p-4 bg-background rounded-xl border border-surface-border/50 text-xs font-bold">
+                    <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center text-muted/40 shadow-inner">
+                        <HiOutlineTruck size={14} />
+                    </div>
+                    <div className="flex flex-col">
+                        <span className="text-[0.6rem] font-black uppercase text-muted/50 tracking-tighter">Current Assignment</span>
+                        <span className="text-ink truncate w-32 tracking-widest uppercase">{typeof driver.assignedBus === "string" ? "LINKED" : driver.assignedBus?.plateNumber || "POOL"}</span>
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-3 mt-2">
+                    <button 
+                        type="button" 
+                        className="flex-1 py-3.5 rounded-xl bg-teal/5 text-teal text-xs font-black uppercase tracking-widest hover:bg-teal hover:text-white transition-all shadow-sm active:scale-95" 
+                        onClick={() => beginDriverEdit(driver)}
+                    >
+                        Configure
+                    </button>
+                    {isAdmin1 ? (
+                        <button
+                            type="button"
+                            className="px-4 py-3.5 rounded-xl bg-rose-50 text-rose-500 hover:bg-rose-500 hover:text-white transition-all active:scale-95"
+                            disabled={busyKey === `driver-delete-${driver._id}`}
+                            onClick={() =>
+                                void runAction(`driver-delete-${driver._id}`, async () => {
+                                    await deleteDriverRequest(driver._id);
+                                }, "Driver deleted.")
+                            }
+                        >
+                            <HiOutlinePlus className="rotate-45" size={18} />
+                        </button>
+                    ) : null}
+                </div>
             </article>
           ))}
+          {drivers.length === 0 && (
+             <div className="col-span-full p-20 bg-background rounded-3xl border-2 border-dashed border-surface-border text-center flex flex-col items-center gap-4">
+                 <div className="w-20 h-20 rounded-full bg-surface border border-surface-border flex items-center justify-center text-muted/30">
+                     <HiOutlineUsers size={48} />
+                 </div>
+                 <div>
+                    <h3 className="text-xl font-black text-ink">No Staff Records</h3>
+                    <p className="text-sm text-muted mt-2">Onboard your first operator to begin fleet distribution duties.</p>
+                 </div>
+             </div>
+          )}
         </div>
-      </div>
+      )}
     </section>
   );
 
   const renderTrips = () => (
-    <section className="panel admin-section">
-      <div className="section-head compact-head">
+    <section className="flex flex-col gap-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 bg-white p-6 rounded-2xl border border-surface-border shadow-sm">
         <div>
-          <span className="eyebrow">Trip scheduling</span>
-          <h2>Create trips and control trip status</h2>
+          <h2 className="text-2xl font-black text-ink">Trip Scheduling</h2>
+          <p className="text-sm text-muted mt-1 font-medium italic">Execute regional deployments and monitor live transit status.</p>
         </div>
+        <button 
+          onClick={() => {
+            if (showTripForm) {
+                setTripForm(emptyTripForm);
+            }
+            setShowTripForm(!showTripForm);
+          }}
+          className={`px-6 py-3 rounded-xl font-black text-sm uppercase tracking-widest transition-all flex items-center gap-2 ${
+            showTripForm 
+                ? "bg-muted/10 text-muted hover:bg-muted/20" 
+                : "bg-teal text-white shadow-lg shadow-teal/20 hover:scale-[1.02]"
+          }`}
+        >
+          {showTripForm ? "Back to Schedule" : "Plan New Trip"}
+          </button>
       </div>
-      <div className="admin-grid">
-        <form className="form-stack panel inset-panel" onSubmit={submitTrip}>
-          <div className="admin-form-grid">
-            <label className="field">
-              <span>Bus</span>
-              <select value={tripForm.busId} onChange={(event) => setTripForm((value) => ({ ...value, busId: event.target.value }))} required>
-                <option value="">Select bus</option>
-                {buses.map((bus) => (
-                  <option key={bus._id} value={bus._id}>
-                    {bus.plateNumber}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Route</span>
-              <select value={tripForm.routeId} onChange={(event) => setTripForm((value) => ({ ...value, routeId: event.target.value }))}>
-                <option value="">Use bus route</option>
-                {routes.map((route) => (
-                  <option key={route._id} value={route._id}>
-                    {route.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Driver</span>
-              <select value={tripForm.driverId} onChange={(event) => setTripForm((value) => ({ ...value, driverId: event.target.value }))}>
-                <option value="">Use bus driver</option>
-                {drivers.map((driver) => (
-                  <option key={driver._id} value={driver._id}>
-                    {driver.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Departure time</span>
-              <input type="datetime-local" value={tripForm.departureTime} onChange={(event) => setTripForm((value) => ({ ...value, departureTime: event.target.value }))} required />
-            </label>
-            <label className="field">
-              <span>Available seats</span>
-              <input type="number" min={1} value={tripForm.availableSeats} onChange={(event) => setTripForm((value) => ({ ...value, availableSeats: event.target.value }))} required />
-            </label>
-            <label className="field">
-              <span>Price</span>
-              <input type="number" min={0} value={tripForm.price} onChange={(event) => setTripForm((value) => ({ ...value, price: event.target.value }))} />
-            </label>
+      
+      {!showTripForm && (
+        <div className="flex flex-col gap-4 animate-in fade-in slide-in-from-top-2 duration-700 delay-150">
+          <div className="flex items-center justify-between px-2">
+              <h3 className="text-[0.65rem] font-black text-muted uppercase tracking-[0.2em]">Available Network Routes</h3>
+              <span className="text-[0.65rem] font-black text-teal uppercase tracking-widest">{routes.length} Active Paths</span>
           </div>
-          <div className="action-row">
-            <button type="submit" className="solid-button" disabled={busyKey === "trip-create"}>
-              Create trip
-            </button>
+          <div className="flex gap-4 overflow-x-auto pb-6 no-scrollbar -mx-2 px-2 mask-fade-right">
+              {routes.map(route => (
+                  <button 
+                      key={route._id}
+                      onClick={() => setViewingRoute(route)}
+                      className="flex-shrink-0 w-64 p-5 rounded-2xl bg-white border border-surface-border shadow-sm hover:border-teal hover:shadow-xl transition-all group text-left relative overflow-hidden active:scale-95"
+                  >
+                      <div className="absolute top-0 right-0 w-16 h-16 bg-teal/5 rounded-bl-full -mr-6 -mt-6 group-hover:bg-teal/10 transition-colors" />
+                      <div className="flex items-center gap-2 mb-3 relative">
+                          <div className="w-1.5 h-6 bg-teal/20 rounded-full group-hover:bg-teal transition-colors" />
+                          <span className="text-sm font-black text-ink truncate flex-1">{route.name}</span>
+                      </div>
+                      <div className="flex items-center justify-between relative">
+                          <span className="text-[0.6rem] font-bold text-muted uppercase tracking-widest">{route.state}</span>
+                          <div className="flex items-center gap-1.5 text-[0.6rem] font-black text-teal uppercase tracking-widest group-hover:underline">
+                              View Path <HiOutlineMap size={12} />
+                          </div>
+                      </div>
+                  </button>
+              ))}
+              {routes.length === 0 && (
+                 <div className="flex-1 py-10 bg-background rounded-2xl border border-dashed border-surface-border text-center flex flex-col items-center justify-center gap-2">
+                    <HiOutlineMap size={24} className="text-muted/20" />
+                    <span className="text-xs font-bold text-muted/60 uppercase">No registered routes available</span>
+                 </div>
+              )}
           </div>
-        </form>
+        </div>
+      )}
 
-        <div className="admin-list-grid">
-          {trips.map((trip) => (
-            <article key={trip._id} className="panel inset-panel admin-card">
-              <div className="trip-card-head">
-                <div>
-                  <strong>{routeName(trip.route)}</strong>
-                  <p>{formatDateTime(trip.departureTime)}</p>
+      {showTripForm ? (
+        <div className="animate-in zoom-in-95 duration-300">
+           <form className="flex flex-col gap-8 p-10 bg-white border border-surface-border rounded-2xl shadow-xl relative overflow-hidden max-w-4xl mx-auto" onSubmit={submitTrip}>
+                <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-teal to-teal-deep" />
+                
+                <h3 className="text-xl font-black text-ink flex items-center gap-3">
+                    <div className="w-1.5 h-6 bg-teal rounded-full" />
+                    Trip Specification
+                </h3>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="space-y-6">
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Network Route</span>
+                            <select 
+                                className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold appearance-none cursor-pointer"
+                                value={tripForm.routeId} 
+                                onChange={(event) => setTripForm((value) => ({ ...value, routeId: event.target.value }))}
+                                required
+                            >
+                                <option value="">Select Route Path</option>
+                                {routes.map((route) => (
+                                  <option key={route._id} value={route._id}>
+                                    {route.name}
+                                  </option>
+                                ))}
+                            </select>
+                        </label>
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Departure Window</span>
+                            <div className="relative">
+                                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-teal/40"><HiOutlineClock size={20} /></span>
+                                <input 
+                                    type="datetime-local" 
+                                    className="w-full bg-background border border-surface-border rounded-xl pl-12 pr-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold"
+                                    value={tripForm.departureTime} 
+                                    onChange={(event) => setTripForm((value) => ({ ...value, departureTime: event.target.value }))} 
+                                    required 
+                                />
+                            </div>
+                        </label>
+                    </div>
+
+                    <div className="space-y-6">
+                        <label className="flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted/60 px-1">Fleet Asset (Bus)</span>
+                            <select 
+                                className="w-full bg-background border border-surface-border rounded-xl px-4 py-4 text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all font-bold appearance-none cursor-pointer"
+                                value={tripForm.busId} 
+                                onChange={(event) => setTripForm((value) => ({ ...value, busId: event.target.value }))}
+                                required
+                            >
+                                <option value="">Select Vehicle</option>
+                                {buses.map((bus) => (
+                                  <option key={bus._id} value={bus._id}>
+                                    {bus.plateNumber} — {bus.busModel || "Carrier"}
+                                  </option>
+                                ))}
+                            </select>
+                        </label>
+                        <div className="p-6 rounded-2xl bg-teal-deep/5 border border-teal/10 flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center text-teal shadow-soft">
+                                <HiOutlineTruck size={24} />
+                            </div>
+                            <p className="text-xs text-teal-deep font-bold leading-relaxed">Seats and pricing are automatically derived from Route & Bus specifications.</p>
+                        </div>
+                    </div>
                 </div>
-                <StatusPill label={trip.status} tone={trip.status === "scheduled" ? "info" : "warning"} />
-              </div>
-              <div className="trip-meta-grid detail-meta-grid">
-                <span>{formatCurrency(trip.price)}</span>
-                <span>{trip.availableSeats} seats</span>
-              </div>
-              <div className="action-row action-row-wrap">
-                <select
-                  value={tripStatusDrafts[trip._id] || trip.status}
-                  onChange={(event) =>
-                    setTripStatusDrafts((value) => ({
-                      ...value,
-                      [trip._id]: event.target.value as Trip["status"],
-                    }))
-                  }
-                >
-                  <option value="scheduled">Scheduled</option>
-                  <option value="ongoing">Ongoing</option>
-                  <option value="completed">Completed</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-                <button
-                  type="button"
-                  className="ghost-button compact-button"
-                  disabled={busyKey === `trip-status-${trip._id}`}
-                  onClick={() =>
-                    void runAction(`trip-status-${trip._id}`, async () => {
-                      await updateTripStatusRequest(trip._id, tripStatusDrafts[trip._id] || trip.status);
-                    }, "Trip status updated.")
-                  }
-                >
-                  Update status
-                </button>
-                <Link to={`/trips/${trip._id}`} className="text-link">
-                  Review
-                </Link>
-              </div>
+
+                <div className="flex items-center gap-4 pt-6 mt-4 border-t border-surface-border">
+                    <button 
+                        type="submit" 
+                        className="flex-1 px-8 py-4 rounded-xl bg-ink text-white font-black text-sm uppercase tracking-widest shadow-xl hover:bg-black transition-all disabled:opacity-50" 
+                        disabled={busyKey.startsWith("trip-")}
+                    >
+                        Deploy Active Trip
+                    </button>
+                    <button 
+                        type="button" 
+                        className="px-8 py-4 rounded-xl bg-white border border-surface-border text-ink font-bold text-sm shadow-sm hover:bg-background transition-colors" 
+                        onClick={() => {
+                            setTripForm(emptyTripForm);
+                            setShowTripForm(false);
+                        }}
+                    >
+                        Cancel
+                    </button>
+                </div>
+           </form>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+          {trips.map((trip) => (
+            <article key={trip._id} className="group p-8 rounded-2xl bg-white border border-surface-border shadow-sm hover:border-teal/50 hover:shadow-xl transition-all duration-300 flex flex-col gap-6 relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-teal/5 rounded-bl-full -mr-8 -mt-8 group-hover:bg-teal/10 transition-colors" />
+                
+                <div className="flex items-start justify-between relative">
+                    <div className="flex flex-col">
+                        <span className="text-[0.6rem] font-black uppercase text-muted tracking-widest mb-1">Departure Schedule</span>
+                        <div className="flex items-center gap-2">
+                            <HiOutlineClock size={16} className="text-teal" />
+                            <strong className="text-lg font-black text-ink">{formatDate(trip.departureTime)}</strong>
+                        </div>
+                    </div>
+                    <StatusPill label={trip.status} tone={trip.status === "scheduled" ? "info" : "success"} />
+                </div>
+
+                <div className="p-5 rounded-xl bg-background border border-surface-border/50 flex flex-col gap-4">
+                    <button 
+                      onClick={() => setViewingRoute(typeof trip.route === "string" ? null : trip.route ?? null)}
+                      className="flex items-center gap-3 hover:text-teal transition-colors group/route text-left"
+                      title="View route on map"
+                    >
+                        <div className="w-1.5 h-1.5 rounded-full bg-teal shadow-[0_0_8px_rgba(20,184,166,0.5)]" />
+                        <span className="text-sm font-black text-ink truncate flex-1">{routeName(trip.route)}</span>
+                        <HiOutlineMap size={14} className="opacity-0 group-hover/route:opacity-100 transition-opacity" />
+                    </button>
+                    <div className="w-px h-4 bg-surface-border ml-0.5" />
+                    <div className="flex items-center gap-3">
+                        <div className="w-1.5 h-1.5 rounded-full bg-surface-border" />
+                        <span className="text-xs font-bold text-muted uppercase tracking-widest">{typeof trip.bus === "string" ? "Linked Asset" : trip.bus?.plateNumber || "No Bus"}</span>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                    <div className="p-4 rounded-xl bg-teal-deep/5 border border-teal/10">
+                        <span className="block text-[0.6rem] font-black text-teal-deep/60 uppercase tracking-widest mb-1">Available Seats</span>
+                        <div className="flex items-baseline gap-1">
+                            <span className="text-xl font-black text-teal-deep">{trip.availableSeats}</span>
+                            <span className="text-[0.6rem] font-bold text-teal-deep/40">/ {getTripCapacity(trip) ?? "--"}</span>
+                        </div>
+                    </div>
+                    <div className="p-4 rounded-xl bg-ink/5 border border-ink/10">
+                        <span className="block text-[0.6rem] font-black text-ink/40 uppercase tracking-widest mb-1">Ticket Price</span>
+                        <span className="text-xl font-black text-ink">{formatCurrency(trip.price)}</span>
+                    </div>
+                </div>
+
+                <div className="flex flex-col gap-4 mt-2">
+                    <div className="flex items-center gap-3">
+                        <select
+                            className="flex-1 bg-white border border-surface-border rounded-xl px-4 py-3 text-xs font-bold text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 appearance-none cursor-pointer"
+                            value={tripStatusDrafts[trip._id] || trip.status}
+                            onChange={(event) =>
+                                setTripStatusDrafts((value) => ({
+                                    ...value,
+                                    [trip._id]: event.target.value as Trip["status"],
+                                }))
+                            }
+                        >
+                            <option value="scheduled">Scheduled</option>
+                            <option value="ongoing">Ongoing</option>
+                            <option value="completed">Completed</option>
+                            <option value="cancelled">Cancelled</option>
+                        </select>
+                        <button
+                            type="button"
+                            className="px-6 py-3 rounded-xl bg-teal text-white text-xs font-black uppercase tracking-widest hover:bg-teal-deep transition-all active:scale-95 disabled:opacity-30 shadow-lg shadow-teal/10"
+                            disabled={busyKey === `trip-status-${trip._id}`}
+                            onClick={() =>
+                                void runAction(`trip-status-${trip._id}`, async () => {
+                                    await updateTripStatusRequest(trip._id, tripStatusDrafts[trip._id] || trip.status);
+                                }, "Trip status updated.")
+                            }
+                        >
+                            Save
+                        </button>
+                    </div>
+                    <div className="flex items-center justify-between px-2">
+                        <span className="text-xs font-bold text-muted italic">{getBookedSeatCount(trip) ?? 0} Passive Bookings</span>
+                        <Link to={`/trips/${trip._id}`} className="text-xs font-black uppercase tracking-widest text-teal hover:underline flex items-center gap-1">
+                            Manifest <HiOutlineMagnifyingGlass size={14} />
+                        </Link>
+                    </div>
+                </div>
             </article>
           ))}
+          {trips.length === 0 && (
+             <div className="col-span-full p-20 bg-background rounded-3xl border-2 border-dashed border-surface-border text-center flex flex-col items-center gap-4">
+                 <div className="w-20 h-20 rounded-full bg-surface border border-surface-border flex items-center justify-center text-muted/30">
+                     <HiOutlineClock size={48} />
+                 </div>
+                 <div>
+                    <h3 className="text-xl font-black text-ink">No Scheduled Trips</h3>
+                    <p className="text-sm text-muted mt-2">Create a new deployment to start accepting passenger bookings.</p>
+                 </div>
+             </div>
+          )}
         </div>
-      </div>
+      )}
     </section>
   );
 
   const renderUsers = () => (
-    <section className="panel admin-section">
-      <div className="section-head compact-head">
-        <div>
-          <span className="eyebrow">User management</span>
-          <h2>See all users and deactivate accounts</h2>
-        </div>
+    <section className="flex flex-col gap-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+      <div className="bg-white p-6 rounded-2xl border border-surface-border shadow-sm">
+        <h2 className="text-2xl font-black text-ink">User Directory</h2>
+        <p className="text-sm text-muted mt-1 font-medium italic">Audit regional accounts, manage permissions, and enforce security policies.</p>
       </div>
-      <div className="admin-list-grid admin-list-grid-wide">
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
         {users.map((person) => (
-          <article key={toId(person)} className="panel inset-panel admin-card">
-            <div className="trip-card-head">
-              <div>
-                <strong>{person.name}</strong>
-                <p>{person.email}</p>
+          <article key={toId(person)} className="group p-8 rounded-2xl bg-white border border-surface-border shadow-sm hover:border-teal/50 hover:shadow-xl transition-all duration-300 flex flex-col gap-6 relative overflow-hidden">
+            <div className={`absolute top-0 right-0 w-24 h-24 rounded-bl-full -mr-8 -mt-8 transition-colors ${
+                person.isActive === false ? "bg-rose-500/5 group-hover:bg-rose-500/10" : "bg-teal/5 group-hover:bg-teal/10"
+            }`} />
+            
+            <div className="flex items-start justify-between relative">
+              <div className="w-14 h-14 rounded-full bg-background border-2 border-white shadow-soft flex items-center justify-center text-teal-deep font-black text-xl">
+                 {person.name.charAt(0)}
               </div>
               <StatusPill label={person.role} tone={roleTone(person.role)} />
             </div>
-            <div className="trip-meta-grid detail-meta-grid">
-              <span>{person.phoneNumber || "No phone"}</span>
-              <span>{person.isActive === false ? "Deactivated" : "Active"}</span>
+
+            <div className="flex flex-col min-w-0">
+                <strong className="text-lg font-black text-ink leading-tight truncate group-hover:text-teal transition-colors" title={person.name}>{person.name}</strong>
+                <span className="text-xs font-bold text-muted truncate mt-1">{person.email}</span>
             </div>
-            <div className="action-row">
-              <span className="muted-copy">Last login: {person.lastLogin ? formatDateTime(person.lastLogin) : "Never"}</span>
+
+            <div className="grid grid-cols-2 gap-4 py-4 border-y border-surface-border/50 bg-background/30 rounded-xl px-4">
+              <div className="flex flex-col">
+                <span className="text-[0.6rem] font-black uppercase tracking-widest text-muted/50 mb-1">Contact</span>
+                <span className="text-xs font-black text-ink truncate">{person.phoneNumber || "N/A"}</span>
+              </div>
+              <div className="flex flex-col text-right">
+                <span className="text-[0.6rem] font-black uppercase tracking-widest text-muted/50 mb-1">Status</span>
+                <span className={`text-xs font-black ${person.isActive === false ? "text-rose-500" : "text-teal-deep"}`}>{person.isActive === false ? "Suspended" : "Active"}</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-2 text-[0.65rem] font-bold text-muted uppercase tracking-tighter">
+                  <HiOutlineClock size={12} className="text-teal/40" />
+                  <span>Activity: {person.lastLogin ? formatDate(person.lastLogin) : "Never"}</span>
+              </div>
               {isAdmin1 && toId(person) !== currentUserId ? (
                 <button
                   type="button"
-                  className="ghost-button compact-button"
-                  disabled={person.isActive === false || busyKey === `user-deactivate-${toId(person)}`}
+                  className={`w-full py-3.5 rounded-xl border font-black text-xs uppercase tracking-widest transition-all active:scale-95 disabled:grayscale ${
+                      person.isActive === false 
+                        ? "bg-teal text-white border-teal shadow-lg shadow-teal/10" 
+                        : "bg-rose-50 text-rose-500 border-rose-100 hover:bg-rose-500 hover:text-white"
+                  }`}
+                  disabled={busyKey === `user-deactivate-${toId(person)}`}
                   onClick={() =>
                     void runAction(`user-deactivate-${toId(person)}`, async () => {
                       await deactivateUserRequest(toId(person));
-                    }, "User deactivated.")
+                    }, "User status toggled.")
                   }
                 >
-                  Deactivate
+                  {person.isActive === false ? "Restore Access" : "Suspend Account"}
                 </button>
-              ) : null}
+              ) : (
+                 <div className="h-12 border border-surface-border/40 rounded-xl bg-background/50 flex items-center justify-center italic text-xs font-bold text-muted/60 uppercase tracking-widest">
+                    Fixed Permissions
+                 </div>
+              )}
             </div>
           </article>
         ))}
@@ -1325,61 +1929,139 @@ export const AdminPage = () => {
   );
 
   const renderBookings = () => (
-    <section className="panel admin-section">
-      <div className="section-head compact-head">
+    <section className="flex flex-col gap-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+      <div className="bg-white p-6 rounded-2xl border border-surface-border shadow-sm flex items-center gap-4">
+        <div className="w-12 h-12 rounded-xl bg-teal/10 flex items-center justify-center text-teal">
+            <HiOutlineCreditCard size={24} />
+        </div>
         <div>
-          <span className="eyebrow">Booking operations</span>
-          <h2>System-wide bookings and payment status tools</h2>
+            <h2 className="text-2xl font-black text-ink">Transaction Ledger</h2>
+            <p className="text-sm text-muted mt-1 font-medium italic">Monitor regional revenue, seat utilization, and passenger boarding logs.</p>
         </div>
       </div>
-      <div className="admin-list-grid admin-list-grid-wide">
+
+      <div className="flex flex-col gap-4">
         {bookings.map((booking) => {
           const trip = getTrip(booking);
           return (
-            <article key={booking._id} className="panel inset-panel admin-card">
-              <div className="trip-card-head">
-                <div>
-                  <strong>{trip ? routeName(trip.route) : `Booking ${booking._id.slice(-6)}`}</strong>
-                  <p>{formatDateTime(booking.createdAt)}</p>
+            <article key={booking._id} className="group p-6 rounded-2xl bg-white border border-surface-border shadow-sm hover:border-teal/30 hover:shadow-xl transition-all duration-300 grid grid-cols-1 md:grid-cols-[auto_1fr_auto_auto] items-center gap-8 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-1.5 h-full bg-teal/20 group-hover:bg-teal transition-colors" />
+                
+                <div className="flex flex-col items-center justify-center w-16 h-16 rounded-xl bg-background border border-surface-border text-ink shrink-0">
+                    <span className="text-[0.6rem] font-black uppercase text-muted tracking-tighter">Seats</span>
+                    <strong className="text-2xl font-black">{booking.seatNumber ?? "--"}</strong>
                 </div>
-                <div className="status-stack">
-                  <StatusPill label={booking.bookingStatus} tone={booking.bookingStatus === "confirmed" ? "success" : "warning"} />
-                  <StatusPill label={booking.paymentStatus} tone={booking.paymentStatus === "paid" ? "success" : "info"} />
+
+                <div className="flex flex-col min-w-0">
+                    <span className="text-[0.6rem] font-black uppercase text-muted tracking-widest mb-1">Commercial Lead</span>
+                    <strong className="text-lg font-black text-ink truncate group-hover:text-teal transition-colors">{getBookingUserName(booking)}</strong>
+                    <span className="text-xs font-bold text-teal mt-1 flex items-center gap-1"><HiOutlineMap size={14} /> {trip ? routeName(trip.route) : "Archived Route"}</span>
                 </div>
-              </div>
-              <div className="trip-meta-grid detail-meta-grid">
-                <span>{formatCurrency(booking.price)}</span>
-                <span>{trip ? formatDateTime(trip.departureTime) : "Trip unavailable"}</span>
-              </div>
-              <div className="action-row action-row-wrap">
-                <input
-                  type="text"
-                  placeholder="Transaction reference"
-                  value={paymentRefs[booking._id] || ""}
-                  onChange={(event) =>
-                    setPaymentRefs((value) => ({
-                      ...value,
-                      [booking._id]: event.target.value,
-                    }))
-                  }
-                />
-                <button
-                  type="button"
-                  className="ghost-button compact-button"
-                  disabled={!paymentRefs[booking._id] || busyKey === `booking-payment-${booking._id}`}
-                  onClick={() =>
-                    void runAction(`booking-payment-${booking._id}`, async () => {
-                      await updateBookingPaymentRequest(booking._id, paymentRefs[booking._id]);
-                      setPaymentRefs((value) => ({ ...value, [booking._id]: "" }));
-                    }, "Booking payment status refreshed.")
-                  }
-                >
-                  Update payment
-                </button>
-              </div>
+
+                <div className="flex flex-col items-end md:items-start min-w-[120px]">
+                    <span className="text-[0.6rem] font-black uppercase text-muted tracking-widest mb-1">Financial Data</span>
+                    <strong className="text-lg font-black text-teal-deep">{formatCurrency(booking.price)}</strong>
+                    <div className="flex gap-2 mt-1">
+                        <StatusPill label={booking.paymentStatus} tone={booking.paymentStatus === "paid" ? "success" : "warning"} />
+                        <StatusPill label={booking.bookingStatus} tone={booking.bookingStatus === "confirmed" ? "success" : "info"} />
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-6">
+                    <div className="flex flex-col items-end">
+                        <span className="text-[0.6rem] font-black uppercase text-muted tracking-widest mb-1">Entry On</span>
+                        <span className="text-xs font-bold text-ink">{formatDate(booking.createdAt)}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <Link to={`/bookings/${booking._id}`} className="w-12 h-12 rounded-xl bg-background border border-surface-border flex items-center justify-center text-muted hover:bg-teal hover:text-white hover:border-teal transition-all shadow-sm">
+                            <HiOutlineMagnifyingGlass size={20} />
+                        </Link>
+                    </div>
+                </div>
+
+                <div className="col-span-full pt-4 border-t border-surface-border/50 grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-4">
+                    <div className="relative">
+                        <input
+                            type="text"
+                            placeholder="Enter settlement reference..."
+                            className="w-full bg-background border border-surface-border rounded-xl px-4 py-3 text-xs font-bold text-ink focus:outline-none focus:ring-2 focus:ring-teal/20 transition-all placeholder:text-muted/40"
+                            value={paymentRefs[booking._id] || ""}
+                            onChange={(event) =>
+                                setPaymentRefs((value) => ({
+                                    ...value,
+                                    [booking._id]: event.target.value,
+                                }))
+                            }
+                        />
+                    </div>
+                    <button
+                        type="button"
+                        className="px-8 py-3 rounded-xl bg-teal text-white text-xs font-black uppercase tracking-widest hover:bg-teal-deep transition-all active:scale-95 disabled:opacity-30 shadow-lg shadow-teal/10"
+                        disabled={!paymentRefs[booking._id] || busyKey === `booking-payment-${booking._id}`}
+                        onClick={() =>
+                            void runAction(`booking-payment-${booking._id}`, async () => {
+                                await updateBookingPaymentRequest(booking._id, paymentRefs[booking._id]);
+                                setPaymentRefs((value) => ({ ...value, [booking._id]: "" }));
+                            }, "Booking settlement synced.")
+                        }
+                    >
+                        Sync Ledger
+                    </button>
+                </div>
             </article>
           );
         })}
+        {bookings.length === 0 && (
+            <div className="p-20 bg-background rounded-3xl border-2 border-dashed border-surface-border text-center flex flex-col items-center gap-4">
+                <div className="w-20 h-20 rounded-full bg-surface border border-surface-border flex items-center justify-center text-muted/30">
+                    <HiOutlineBanknotes size={48} />
+                </div>
+                <h3 className="text-xl font-black text-ink">No Transactional Data</h3>
+                <p className="text-sm text-muted mt-2">Passenger bookings will populate this ledger as they are confirmed by the regional gateway.</p>
+            </div>
+        )}
+      </div>
+    </section>
+  );
+
+  const renderSettings = () => (
+    <section className="flex flex-col gap-12 animate-in fade-in slide-in-from-bottom-2 duration-500 py-10 max-w-4xl mx-auto">
+      <div className="text-center">
+        <h2 className="text-4xl font-black text-ink">System Preferences</h2>
+        <p className="text-sm text-muted mt-3 font-medium italic">Configure global thresholds, security protocols, and operational parameters.</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div className="p-10 rounded-3xl bg-white border border-surface-border shadow-xl hover:shadow-2xl transition-all relative overflow-hidden group">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-teal/5 rounded-bl-[100px] -mr-16 -mt-16 group-hover:bg-teal/10 transition-colors" />
+            <div className="w-16 h-16 rounded-2xl bg-teal/10 flex items-center justify-center text-teal mb-8">
+                <HiOutlineLockClosed size={32} />
+            </div>
+            <h3 className="text-xl font-black text-ink mb-4">Security Credentials</h3>
+            <p className="text-sm text-muted leading-relaxed mb-8">Update your administrative password and manage multi-factor authentication settings.</p>
+            <button className="w-full py-4 rounded-xl bg-ink text-white font-black text-xs uppercase tracking-widest hover:bg-black transition-all shadow-lg active:scale-95">
+                Modify Authentication
+            </button>
+        </div>
+
+        <div className="p-10 rounded-3xl bg-white border border-surface-border shadow-xl hover:shadow-2xl transition-all relative overflow-hidden group">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-rose-500/5 rounded-bl-[100px] -mr-16 -mt-16 group-hover:bg-rose-500/10 transition-colors" />
+            <div className="w-16 h-16 rounded-2xl bg-rose-50 text-rose-500 mb-8 flex items-center justify-center">
+                <HiOutlineClock size={32} />
+            </div>
+            <h3 className="text-xl font-black text-ink mb-4">Account Deprovisioning</h3>
+            <p className="text-sm text-muted leading-relaxed mb-8">Terminate your administrative session and remove access tokens from this device securely.</p>
+            <button 
+                onClick={logout}
+                className="w-full py-4 rounded-xl bg-rose-50 text-rose-500 font-black text-xs uppercase tracking-widest hover:bg-rose-500 hover:text-white transition-all shadow-lg active:scale-95"
+            >
+                Terminate Session
+            </button>
+        </div>
+      </div>
+
+      <div className="p-8 rounded-2xl bg-teal-deep/5 border border-teal/10 text-center">
+          <p className="text-xs font-bold text-teal-deep/60 uppercase tracking-widest">Platform Core Node: v4.2.0-stable</p>
       </div>
     </section>
   );
@@ -1398,6 +2080,8 @@ export const AdminPage = () => {
         return renderUsers();
       case "bookings":
         return renderBookings();
+      case "settings":
+        return renderSettings ? renderSettings() : null;
       default:
         return null;
     }
@@ -1405,39 +2089,51 @@ export const AdminPage = () => {
 
   if (loading) {
     return (
-      <div className="container page-pad">
+      <div className="max-w-[1400px] mx-auto px-4 md:px-6 pt-10 pb-16 md:pt-6 md:pb-12 text-left">
         <LoadingScreen message="Loading admin workspace" />
       </div>
     );
   }
 
   return (
-    <div className="container page-stack page-pad">
+    <div className="max-w-[1400px] mx-auto px-4 md:px-6 grid gap-6 pt-10 pb-16 md:pt-6 md:pb-12 text-left">
       <ToastBanner message={banner} />
       <PageIntro
         eyebrow="Admin workspace"
-        title="Operate routes, buses, drivers, trips, users, and bookings from one place"
-        description="This workspace is role-gated on the frontend and wired to the backend admin endpoints. `admin2` can create and update resources, while `admin1` also sees destructive controls."
+        title="Network operation center"
+        description="This workspace is role-gated on the frontend and wired to the backend admin endpoints. Operates routes, buses, drivers, trips, users, and bookings from one place."
         actions={tabButtons}
       />
 
-      <section className="stat-grid">
+      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
         {stats.map((stat) => (
-          <article key={stat.label} className="panel stat-card">
-            <stat.icon size={22} />
-            <strong>{stat.value}</strong>
-            <span>{stat.label}</span>
+          <article key={stat.label} className="flex items-center gap-5 p-6 bg-white border border-surface-border rounded-xl shadow-sm hover:shadow-md transition-shadow">
+            <div className="w-12 h-12 rounded-xl bg-teal/5 flex items-center justify-center text-teal-deep">
+              <stat.icon size={24} />
+            </div>
+            <div className="flex flex-col">
+                <span className="text-xs font-bold text-muted uppercase tracking-widest mb-1">{stat.label}</span>
+                <strong className="text-3xl font-black text-ink leading-none">{stat.value}</strong>
+            </div>
           </article>
         ))}
-        <article className="panel stat-card">
-          <HiOutlineBanknotes size={22} />
-          <strong>{bookings.filter((booking) => booking.paymentStatus === "paid").length}</strong>
-          <span>Paid bookings</span>
+        <article className="flex items-center gap-5 p-6 bg-white border border-surface-border rounded-xl shadow-sm hover:shadow-md transition-shadow">
+          <div className="w-12 h-12 rounded-xl bg-teal/5 flex items-center justify-center text-teal-deep">
+            <HiOutlineBanknotes size={24} />
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs font-bold text-muted uppercase tracking-widest mb-1">Total Revenue</span>
+            <strong className="text-3xl font-black text-ink leading-none">{bookings.filter((booking) => booking.paymentStatus === "paid").length}</strong>
+          </div>
         </article>
-        <article className="panel stat-card">
-          <HiOutlineClock size={22} />
-          <strong>{trips.filter((trip) => trip.status === "ongoing").length}</strong>
-          <span>Trips currently ongoing</span>
+        <article className="flex items-center gap-5 p-6 bg-white border border-surface-border rounded-xl shadow-sm hover:shadow-md transition-shadow">
+          <div className="w-12 h-12 rounded-xl bg-rose-50 flex items-center justify-center text-rose-500">
+            <HiOutlineClock size={24} />
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs font-bold text-muted uppercase tracking-widest mb-1">Active Trips</span>
+            <strong className="text-3xl font-black text-ink leading-none">{trips.filter((trip) => trip.status === "ongoing").length}</strong>
+          </div>
         </article>
       </section>
 
@@ -1445,7 +2141,51 @@ export const AdminPage = () => {
       {routes.length + buses.length + drivers.length + trips.length + users.length + bookings.length === 0 ? (
         <EmptyState title="No admin data available" description="The admin endpoints returned empty collections. Once the backend has data, management cards and actions will populate here." />
       ) : null}
-      {renderActiveSection()}
+      
+      <div className="mt-4">
+        {renderActiveSection()}
+      </div>
+
+      {viewingRoute && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-8 animate-in fade-in duration-300">
+          <div className="absolute inset-0 bg-ink/60 backdrop-blur-sm" onClick={() => setViewingRoute(null)} />
+          <div className="relative w-full max-w-5xl bg-white rounded-3xl overflow-hidden shadow-2xl flex flex-col animate-in zoom-in-95 duration-300 h-[80vh]">
+            <div className="p-6 border-b border-surface-border flex items-center justify-between bg-white">
+              <div>
+                <h3 className="text-xl font-black text-ink">{viewingRoute.name}</h3>
+                <p className="text-xs font-bold text-muted uppercase tracking-widest mt-1">{viewingRoute.state} • {viewingRoute.stops.length} Managed Waypoints</p>
+              </div>
+              <button 
+                onClick={() => setViewingRoute(null)}
+                className="w-10 h-10 rounded-xl bg-background border border-surface-border flex items-center justify-center text-ink hover:bg-rose-500 hover:text-white hover:border-rose-500 transition-all shadow-sm"
+              >
+                <HiOutlinePlus className="rotate-45" size={20} />
+              </button>
+            </div>
+            <div className="flex-1 relative bg-background">
+              <TransitMap route={viewingRoute} className="absolute inset-0 w-full h-full" />
+            </div>
+            <div className="p-6 bg-background border-t border-surface-border grid grid-cols-2 md:grid-cols-4 gap-4">
+               <div className="flex flex-col">
+                  <span className="text-[0.6rem] font-black text-muted uppercase tracking-tighter">Commence</span>
+                  <span className="text-sm font-black text-ink truncate">{shortLocationName(viewingRoute.startLocation.name)}</span>
+               </div>
+               <div className="flex flex-col">
+                  <span className="text-[0.6rem] font-black text-muted uppercase tracking-tighter">Terminate</span>
+                  <span className="text-sm font-black text-ink truncate">{shortLocationName(viewingRoute.endLocation.name)}</span>
+               </div>
+               <div className="flex flex-col">
+                  <span className="text-[0.6rem] font-black text-muted uppercase tracking-tighter">Distance</span>
+                  <span className="text-sm font-black text-ink">{viewingRoute.distanceKm || 'AUTO'} km</span>
+               </div>
+               <div className="flex flex-col">
+                  <span className="text-[0.6rem] font-black text-muted uppercase tracking-tighter">Base Fare</span>
+                  <span className="text-sm font-black text-teal-deep">{formatCurrency(viewingRoute.basePrice)}</span>
+               </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

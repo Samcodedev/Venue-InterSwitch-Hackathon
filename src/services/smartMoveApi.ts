@@ -7,12 +7,14 @@ import type {
   Bus,
   Coordinates,
   Driver,
+  DriverDashboard,
   NearbyBusResult,
   PaginatedEnvelope,
   PaginatedResult,
   RouteRecord,
   Trip,
   TripEta,
+  TravelEstimate,
   User,
 } from "@/types/domain";
 
@@ -27,7 +29,7 @@ const unwrapPaginated = <T>(payload: PaginatedEnvelope<T>): PaginatedResult<T> =
 });
 
 export const loginRequest = async (payload: {
-  email: string;
+  identifier: string;
   password: string;
 }): Promise<AuthPayload> => {
   const response = await api.post<ApiEnvelope<AuthPayload>>("/auth/login", payload);
@@ -58,6 +60,8 @@ export const updateProfileRequest = async (payload: {
   name?: string;
   phoneNumber?: string;
   profilePicture?: string;
+  currentPassword?: string;
+  newPassword?: string;
 }): Promise<User> => {
   const response = await api.put<ApiEnvelope<User>>("/users/profile", payload);
   return unwrap(response.data);
@@ -94,6 +98,7 @@ export const updateRouteRequest = async (
   routeId: string,
   payload: Partial<{
     name: string;
+    state: string;
     startLocation: { name: string; coordinates: Coordinates };
     endLocation: { name: string; coordinates: Coordinates };
     stops: Array<{ name: string; coordinates: Coordinates; order: number }>;
@@ -196,6 +201,18 @@ export const deleteDriverRequest = async (driverId: string): Promise<void> => {
   await api.delete(`/drivers/${driverId}`);
 };
 
+export const getDriverDashboardRequest = async (): Promise<DriverDashboard> => {
+  const response = await api.get<ApiEnvelope<DriverDashboard>>("/drivers/me/dashboard");
+  return unwrap(response.data);
+};
+
+export const updateDriverStatusRequest = async (
+  status: NonNullable<Driver["status"]>,
+): Promise<Driver> => {
+  const response = await api.patch<ApiEnvelope<Driver>>("/drivers/me/status", { status });
+  return unwrap(response.data);
+};
+
 export const getAvailableTrips = async (filters?: {
   routeId?: string;
   date?: string;
@@ -245,6 +262,23 @@ export const getTripEta = async (tripId: string): Promise<TripEta> => {
   return unwrap(response.data);
 };
 
+export const getTripBookingEstimate = async (params: {
+  tripId: string;
+  pickupStopName?: string;
+  dropoffStopName?: string;
+}): Promise<TravelEstimate & { tripId: string; departureTime: string; status: Trip["status"] }> => {
+  const response = await api.get<
+    ApiEnvelope<TravelEstimate & { tripId: string; departureTime: string; status: Trip["status"] }>
+  >(`/trips/${params.tripId}/booking-estimate`, {
+    params: {
+      pickupStopName: params.pickupStopName,
+      dropoffStopName: params.dropoffStopName,
+    },
+  });
+
+  return unwrap(response.data);
+};
+
 export const getNearestBuses = async (coords: {
   lat: number;
   lng: number;
@@ -262,10 +296,27 @@ export const createBookingRequest = async (payload: {
   seatNumber?: number;
   pickupStop?: { name: string; coordinates: { lat: number; lng: number } };
   dropoffStop?: { name: string; coordinates: { lat: number; lng: number } };
-  callbackUrl?: string;
 }): Promise<BookingResult> => {
   const response = await api.post<ApiEnvelope<BookingResult>>("/bookings", payload);
   return unwrap(response.data);
+};
+
+export const initializeBookingPaymentRequest = async (
+  bookingId: string,
+): Promise<BookingResult> => {
+  const response = await api.post<ApiEnvelope<BookingResult>>(
+    `/bookings/${bookingId}/payment/initialize`,
+  );
+  return unwrap(response.data);
+};
+
+export const confirmBookingPaymentRequest = async (
+  bookingId: string,
+): Promise<Booking> => {
+  const response = await api.post<ApiEnvelope<{ booking: Booking }>>(
+    `/bookings/${bookingId}/payment/confirm`,
+  );
+  return unwrap(response.data).booking;
 };
 
 export const getMyBookings = async (): Promise<PaginatedResult<Booking>> => {

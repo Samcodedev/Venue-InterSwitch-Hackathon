@@ -14,7 +14,7 @@ interface AuthContextValue {
   isReady: boolean;
   isBusy: boolean;
   isAuthenticated: boolean;
-  login: (payload: { email: string; password: string }) => Promise<void>;
+  login: (payload: { identifier: string; password: string }) => Promise<void>;
   register: (payload: {
     name: string;
     email: string;
@@ -27,6 +27,8 @@ interface AuthContextValue {
     name?: string;
     phoneNumber?: string;
     profilePicture?: string;
+    currentPassword?: string;
+    newPassword?: string;
   }) => Promise<User>;
 }
 
@@ -81,7 +83,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     return () => window.removeEventListener("smartmove-auth", syncFromStorage);
   }, []);
 
-  const login = async (payload: { email: string; password: string }): Promise<void> => {
+  const login = async (payload: { identifier: string; password: string }): Promise<void> => {
     setIsBusy(true);
 
     try {
@@ -155,6 +157,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     name?: string;
     phoneNumber?: string;
     profilePicture?: string;
+    currentPassword?: string;
+    newPassword?: string;
   }): Promise<User> => {
     const snapshot = readAuthSnapshot();
     if (!snapshot) {

@@ -12,7 +12,7 @@ export interface Stop extends LocationPoint {
   order: number;
 }
 
-export type Role = "user" | "admin1" | "admin2";
+export type Role = "user" | "admin1" | "admin2" | "driver";
 
 export interface User {
   _id?: string;
@@ -22,6 +22,9 @@ export interface User {
   phoneNumber?: string;
   profilePicture?: string;
   role: Role;
+  licenseNumber?: string;
+  assignedBus?: Bus | string | null;
+  status?: "available" | "active" | "on_trip" | "offline";
   isActive?: boolean;
   lastLogin?: string;
   createdAt?: string;
@@ -60,7 +63,7 @@ export interface Driver {
   phoneNumber?: string;
   licenseNumber?: string;
   rating?: number;
-  status?: "available" | "on_trip" | "offline";
+  status?: "available" | "active" | "on_trip" | "offline";
   assignedBus?: Bus | string | null;
 }
 
@@ -89,7 +92,13 @@ export interface Booking {
   seatNumber?: number;
   pickupStop?: BookingStop;
   dropoffStop?: BookingStop;
+  travelEstimate?: TravelEstimate;
   price?: number;
+  paymentTransactionRef?: string;
+  paymentReference?: string;
+  paymentVerifiedAt?: string;
+  paymentResponseCode?: string;
+  paymentResponseDescription?: string;
   paymentStatus: "pending" | "paid" | "failed";
   bookingStatus: "confirmed" | "cancelled" | "completed";
   createdAt: string;
@@ -100,13 +109,31 @@ export interface TripEta {
   tripId: string;
   departureTime: string;
   estimatedArrival: string;
+  predictedDurationMinutes: number;
   delayMinutes: number;
   trafficCondition: "light" | "moderate" | "heavy";
   confidence: number;
   status: Trip["status"];
 }
 
+export interface TravelEstimate {
+  pickupStopName: string;
+  dropoffStopName: string;
+  estimatedArrival: string;
+  predictedDurationMinutes: number;
+  delayMinutes: number;
+  trafficCondition: "light" | "moderate" | "heavy";
+  confidence: number;
+  historicalSamples: number;
+  historicalWindowDays: number;
+  model: string;
+}
+
 export interface PaymentPayload {
+  checkoutUrl: string;
+  formFields: Record<string, string>;
+  amount: number;
+  currency: string;
   paymentReference: string;
   redirectUrl: string;
   transactionRef: string;
@@ -115,6 +142,14 @@ export interface PaymentPayload {
 export interface BookingResult {
   booking: Booking;
   payment: PaymentPayload | null;
+  travelEstimate?: TravelEstimate;
+}
+
+export interface DriverDashboard {
+  driver: Driver;
+  bus?: Bus | string | null;
+  trips: Trip[];
+  bookings: Booking[];
 }
 
 export interface NearbyBus extends Bus {
