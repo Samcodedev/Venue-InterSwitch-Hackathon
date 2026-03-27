@@ -4,6 +4,8 @@
 
 This project was built and submitted for the **Interswitch Venue Hackathon**.
 
+## Link to the [Back-end Repo](https://github.com/Samcodedev/SmartMove/tree/main/back-end/)
+
 ---
 
 ## 💡 The Problem We Are Solving
